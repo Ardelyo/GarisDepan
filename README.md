@@ -10,6 +10,10 @@ Game strategi peta: kamu memimpin negara dengan **menggambar langsung di peta**,
 
 Dokumen desain lengkap: [`docs/RENCANA.md`](docs/RENCANA.md).
 
+## Main online
+
+Setelah di-merge ke `main`, game otomatis dipublikasikan ke GitHub Pages di `https://ardelyo.github.io/GarisDepan/`. Aktifkan sekali di **Settings → Pages → Source: GitHub Actions**.
+
 ## Menjalankan
 
 ```bash
