@@ -13,6 +13,8 @@
     "balance": "node -e \"process.env.GD_BALANCE=1;require('child_process').execSync('npx vitest run',{stdio:'inherit',env:process.env})\""
   },
   "devDependencies": {
+    "@fontsource/barlow-condensed": "^5.3.0",
+    "@fontsource/inter": "^5.3.0",
     "typescript": "^5.9.3",
     "vite": "^7.2.4",
     "vitest": "^3.2.4"

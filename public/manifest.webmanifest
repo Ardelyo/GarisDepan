@@ -1,0 +1,17 @@
+{
+  "name": "Garis Depan",
+  "short_name": "Garis Depan",
+  "description": "Game strategi peta: gambar perintah langsung di peta, giliran simultan, hot-seat 2–8 pemain.",
+  "lang": "id",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#05080e",
+  "theme_color": "#05080e",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

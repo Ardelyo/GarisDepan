@@ -848,5 +848,5 @@ function checkVictory(s: GameState, gdps: number[], news: string[]) {
     }
     if (best) s.winner = { country: best.id, cond: `Skor tertinggi saat batas giliran (${bs})` };
   }
-  if (s.winner) news.unshift(`🏆 ${s.countries[s.winner.country].name} MENANG — ${s.winner.cond}`);
+  if (s.winner) news.unshift(`${s.countries[s.winner.country].name} MENANG — ${s.winner.cond}`);
 }

@@ -31,6 +31,8 @@ export class Director {
   paused = false;
   /** Off = locked wide shot with a slow push-in (reference look). On = jump to the biggest battle. */
   autoCam = false;
+  /** Motion smoothing time constant (virtual ms). Small values disable it (used by tests/measurements). */
+  smoothTau = 520;
   t = 0;
   private lastNow = 0;
   private res!: Resolution;
@@ -49,6 +51,8 @@ export class Director {
   private theatre: { x0: number; y0: number; x1: number; y1: number } | null = null;
   private camAnim: { from: { x: number; y: number; zoom: number }; to: { x: number; y: number; zoom: number }; t0: number; dur: number } | null = null;
   private routes = new Map<string, { route: Pt[]; nodes: number[]; drawn: boolean }>();
+  /** Low-pass state per column: removes the speed jumps that a per-day linear interpolation leaves at day boundaries. */
+  private smooth = new Map<number, { key: string; u: number; tr: number }>();
   private dets: { owner: number; from: Pt; a: number; b: number; troops: number; t0: number }[] = [];
 
   onMoment?: (text: string, color: string, kind: string) => void;
@@ -77,16 +81,18 @@ export class Director {
       });
     });
     this.sched.sort((a, b) => a.time - b.time);
-    // frame the theatre: everything that happens this turn (battles, captures, army routes)
-    const P = this.map.provinces;
-    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    const grow = (x: number, y: number) => { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); };
+    // frame the theatre: where the fighting actually is (battle points + capture entry points),
+    // trimmed of outliers so one far-away skirmish does not zoom the whole turn out
+    const xs: number[] = [], ys: number[] = [];
     for (const sc of this.sched) {
-      if (sc.ev.t === 'battle') grow(sc.ev.x, sc.ev.y);
-      else if (sc.ev.t === 'capture') { const b = P[sc.ev.prov].bbox; grow(b.x0, b.y0); grow(b.x1, b.y1); }
+      if (sc.ev.t === 'battle') { xs.push(sc.ev.x); ys.push(sc.ev.y); }
+      else if (sc.ev.t === 'capture') { xs.push(sc.ev.ex); ys.push(sc.ev.ey); }
     }
-    for (const c of res.frames[0].cols) for (const i of c.path) grow(P[i].x, P[i].y);
-    this.theatre = Number.isFinite(x0) ? { x0, y0, x1, y1 } : null;
+    if (xs.length) {
+      xs.sort((a, b) => a - b); ys.sort((a, b) => a - b);
+      const lo = Math.floor(xs.length * 0.08), hi = Math.max(lo, Math.ceil(xs.length * 0.92) - 1);
+      this.theatre = { x0: xs[lo], x1: xs[hi], y0: ys[lo], y1: ys[hi] };
+    } else this.theatre = null;
     this.routes.clear();
     this.restart(now);
   }
@@ -99,6 +105,7 @@ export class Director {
     this.annex = [];
     this.flash.clear();
     this.capturedAt.clear();
+    this.smooth.clear();
     this.dets = [];
     this.battles = [];
     this.spotlight = null;
@@ -107,8 +114,8 @@ export class Director {
     this.r.fitAll();
     if (this.theatre) {
       const th = this.theatre;
-      const pad = 1.5;
-      const w = Math.max(260, (th.x1 - th.x0) * pad), hgt = Math.max(200, (th.y1 - th.y0) * pad);
+      const pad = 1.6;
+      const w = Math.max(380, (th.x1 - th.x0) * pad), hgt = Math.max(300, (th.y1 - th.y0) * pad);
       const fit = this.r.cam.zoom;
       this.r.cam = { x: (th.x0 + th.x1) / 2, y: (th.y0 + th.y1) / 2, zoom: clamp(Math.min(this.r.W / w, this.r.H / hgt), fit, Math.max(fit, 1.6)) };
       this.r.clampCam();
@@ -239,7 +246,7 @@ export class Director {
     }
 
     // ---- interpolated state ----
-    const troops = A.troops.map((a, i) => Math.round(lerp(a, B.troops[i], easeInOut(f))));
+    const troops = A.troops.map((a, i) => Math.round(lerp(a, B.troops[i], f)));
     const ctrl = A.ctrl.slice();
     this.capturedAt.forEach((to, p) => (ctrl[p] = to));
     if (this.t >= this.total - 1) for (let i = 0; i < ctrl.length; i++) ctrl[i] = frames[nDays].ctrl[i];
@@ -257,7 +264,17 @@ export class Director {
       let alpha = 1;
       if (cb.gone) alpha = 1 - clamp((f - 0.6) / 0.4, 0, 1);
       else if (!ca) alpha = Math.min(1, f * 4);
-      const tr = lerp(ca?.troops ?? cb.troops, cb.troops, f);
+      const trT = lerp(ca?.troops ?? cb.troops, cb.troops, f);
+      const uT = lerp(ua, ub, f);
+      // critically-damped follower (time constant in virtual ms): fluid start, stop and turn
+      const key = cb.path.join();
+      let st = this.smooth.get(cb.id);
+      if (!st || st.key !== key || Math.abs(uT - st.u) > 0.5) st = { key, u: uT, tr: trT };
+      const k = 1 - Math.exp(-vdt / Math.max(1, this.smoothTau));
+      st.u += (uT - st.u) * k;
+      st.tr += (trT - st.tr) * (1 - Math.exp(-vdt / 300));
+      this.smooth.set(cb.id, st);
+      const tr = st.tr;
       // formation: column while marching, line along the border when closing in / fighting,
       // then back to column once through
       const a = cb.path[cb.idx], b = cb.path[cb.idx + 1];
@@ -270,12 +287,13 @@ export class Director {
         else if (!enemyAhead && A.ctrl[b] !== cb.owner && prog > 0.45 && prog < 0.85) lineK = 1 - (prog - 0.45) / 0.4;
       }
       cols.push({
+        id: cb.id,
         lineA: a,
         lineB: b ?? -1,
         lineK: clamp(lineK, 0, 1),
         owner: cb.owner,
         route: r.route,
-        u: lerp(ua, ub, f),
+        u: st.u,
         troops: Math.round(tr),
         fighting: cb.fighting,
         kind: cb.kind,

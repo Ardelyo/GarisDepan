@@ -60,13 +60,15 @@ Goresan dihaluskan (Douglas–Peucker, lalu Catmull–Rom), dikenali sebagai gar
 
 **Tontonan**
 - Dua tema dengan satu sistem animasi: **Satelit** (gelap, perbatasan bercahaya, stipple di tepi depan, lampu kota) dan **Kartun** (flat cerah, garis depan hitam bergaya spidol, unit bulat).
-- **Resolusi progresif** (meniru video referensi): ±4,5 detik per hari, peristiwa tersebar di dalam hari. Wilayah yang direbut tumbuh **sel demi sel** dari titik masuk: titik-titik tipis di depan, tepi terang, isi di belakangnya.
+- **Resolusi progresif** (meniru video referensi): ±4,5 detik per hari, peristiwa tersebar di dalam hari. Wilayah yang direbut tumbuh sebagai **gumpalan organik** dari titik masuk dengan tepi bercahaya lembut; gerak pasukan dihaluskan sehingga mulai, berhenti, dan berbelok tanpa patah.
 - **Panah pemain dipakai**: pasukan berbaris tepat di sepanjang garis yang digambar, dan panah "termakan" dari ekor seiring pasukan maju. Tiap pasukan tampil sebagai blok formasi dengan satu kartu unit (bendera, nama, kekuatan).
 - **Pasukan cerdas**: saat berbaris, pasukan memeriksa sayapnya. Bila ada musuh di samping (atau pasukan musuh menuju posisinya), sebagian (maks 30%) memisahkan diri sebagai penjaga sayap, menggali parit, dan terlihat berlari ke perbatasan yang terancam. Formasi berubah dari blok kolom saat berbaris menjadi garis yang mengikuti seluruh perbatasan yang menghadap musuh saat mendekat/bertempur, lalu kembali menjadi kolom setelah tembus.
 - Ledakan lima tahap ±5,5 detik (gelombang kejut, bola api, puncak kecokelatan, asap hitam, hanyut), kabut asap yang menetap, rudal berjejak terang, cincin reticle di sasaran, urutan pendaratan amfibi, pesawat patroli & konvoi kapal yang selalu bergerak.
 - Kamera **terkunci** pada teater giliran itu dengan push-in pelan; **kamera sutradara** (sorot pertempuran terbesar dengan sapuan + motion blur) bisa dinyalakan. Jeda, 1×/2×/4×, putar ulang, lewati.
 - **Rekam Resolusi** mengekspor giliran sebagai video vertikal 9:16 (WebM) dengan cap tanggal & korban.
 - Audio sintetis WebAudio (artileri, coretan spidol, pesawat, drone ambien yang naik saat pertempuran). Tanpa file aset.
+
+**Mobile-first & aset**: bisa dipasang ke layar utama (PWA) dan dibuka offline setelah kunjungan pertama; font dan ikon vektor dipaketkan (tanpa emoji atau CDN); gestur sentuh dengan inersia, ketuk dua kali untuk zoom, getar haptik, dan kualitas grafis adaptif. Detail pengukuran: [`docs/EVALUASI-ANIMASI.md`](docs/EVALUASI-ANIMASI.md).
 
 **Aksesibilitas & kontrol**: target sentuh ≥44 px, mode kidal, pola arsir buta warna per negara, tata letak portrait (dock bawah) dan landscape/PC (dock kiri, panel kanan).
 

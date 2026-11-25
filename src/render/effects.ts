@@ -23,6 +23,8 @@ const h01 = (n: number) => {
  */
 export class Effects {
   time = 0;
+  /** 0..1: scales puff counts and haze so weak devices stay smooth. */
+  density = 1;
   explosions: Explosion[] = [];
   hazes: Haze[] = [];
   planes: Plane[] = [];
@@ -99,7 +101,7 @@ export class Effects {
       const t = (now - hz.t0) / hz.dur;
       if (t < 0) continue;
       const a = Math.min(1, t * 5) * (1 - t) * (sat ? 0.32 : 0.26);
-      for (let k = 0; k < 5; k++) {
+      for (let k = 0, nk = Math.max(2, Math.round(5 * this.density)); k < nk; k++) {
         const ang = hz.seed + k * 1.3;
         const rr = hz.r * px * (0.55 + 0.25 * h01(hz.seed + k)) * (1 + 0.5 * t);
         const cx = hz.x + Math.cos(ang) * hz.r * px * 0.45 + t * 6 * px;
@@ -339,7 +341,8 @@ export class Effects {
       else col = mix(brown, smoke, Math.min(1, (age - 2.5) / 1.2));
       const alpha = (age < 0.15 ? age / 0.15 : 1) * fadeOut * (age > 2.5 ? 0.85 : 0.95);
       // a lobe is a cluster of puffs
-      for (let k = 0; k < 5; k++) {
+      const puffs = Math.max(2, Math.round(5 * this.density));
+      for (let k = 0; k < puffs; k++) {
         const ang = h01(e.seed * 13 + li * 5 + k) * Math.PI * 2;
         const off = lr * 0.45;
         const cx = lx + Math.cos(ang) * off, cy = ly + Math.sin(ang) * off * 0.7;

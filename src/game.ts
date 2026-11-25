@@ -19,7 +19,7 @@ import { planAI } from './sim/ai';
 import { resolveTurn, fmtInt, scoreOf } from './sim/sim';
 import type { BuildKind, Frac, GameState, Order, ProposalKind, Resolution } from './sim/types';
 import { buildLobby, type LobbyConfig } from './ui/lobby';
-import { h, svg, ICONS } from './ui/dom';
+import { h, svg, iconEl, ICONS } from './ui/dom';
 
 type Tool = 'geser' | 'panah' | 'gerak' | 'garis' | 'udara' | 'bangun' | 'hangus';
 type Phase = 'lobby' | 'curtain' | 'plan' | 'resolve' | 'report' | 'over';
@@ -72,6 +72,25 @@ export class Game {
   previewState: GameState | null = null;
   private lastT = performance.now();
   private nextAmbient = 0;
+  private frameEma = 16.7;
+  private qualityCool = 0;
+  private haptics = (() => { try { return localStorage.getItem('garisdepan.haptic') !== '0'; } catch { return true; } })();
+
+  /** Short vibration on supporting phones: confirms commits without looking at the screen. */
+  private haptic(p: number | number[]) {
+    if (!this.haptics) return;
+    try { navigator.vibrate?.(p); } catch { /* unsupported */ }
+  }
+
+  /** Double-tap: zoom into the tapped spot; again to return to the whole map. */
+  private doubleTap(sx: number, sy: number) {
+    if (this.phase === 'lobby' || this.phase === 'curtain' || this.phase === 'resolve') return;
+    const w = this.r.screenToWorld(sx, sy);
+    const fit = Math.min(this.r.W / this.map.w, this.r.H / this.map.h);
+    const z = this.r.cam.zoom;
+    if (z < fit * 2.4) this.r.flyTo(w.x, w.y, Math.min(5, Math.max(z * 2.2, fit * 2.6)));
+    else this.r.flyTo(this.map.w / 2, this.map.h / 2, fit * 1.02, 420);
+  }
   private lastCam = { x: 0, y: 0 };
   private ui: HTMLElement;
   private canvas: HTMLCanvasElement;
@@ -93,6 +112,7 @@ export class Game {
   // =====================================================================
   private setMap(map: GameMap, theme: GameState['settings']['theme']) {
     this.map = map;
+    this.r?.dispose();
     this.r = new Renderer(this.canvas, map);
     this.r.resize();
     this.r.setTheme(theme);
@@ -103,7 +123,7 @@ export class Game {
     this.dir.onSound = (k, i) => {
       if (k === 'boom') { if (Math.random() < 0.5) this.audio.boom(i); }
       else if (k === 'plane') this.audio.plane();
-      else this.audio.sting(k === 'capture' ? 'capture' : 'moment');
+      else { this.audio.sting(k === 'capture' ? 'capture' : 'moment'); if (k === 'capture') this.haptic(10); }
     };
     this.input = new Input(this.canvas, this.r, {
       strokeStart: (x, y, touch) => this.strokeStart(x, y, touch),
@@ -114,7 +134,8 @@ export class Game {
       longPress: (x, y) => this.longPress(x, y),
       wheelDuringStroke: (d) => { this.frac = d > 0 ? (this.frac === 1 ? 0.5 : 0.25) : this.frac === 0.25 ? 0.5 : 1; this.toast(`Kekuatan panah: ${this.frac * 100}%`); },
       threeFingerSwipe: (d) => (d < 0 ? this.undo() : this.redo()),
-      onCameraMove: () => this.hideFloating(),
+      doubleTap: (x, y) => this.doubleTap(x, y),
+      onCameraMove: () => { this.r.cancelFlight(); this.hideFloating(); },
     });
   }
 
@@ -233,8 +254,8 @@ export class Game {
     const mb = this.els.moreBtn;
     if (mb) {
       mb.classList.toggle('active', isMore);
-      const label = MORE.find(([m]) => m === t)?.[1] ?? 'Alat';
-      mb.replaceChildren(svg(isMore ? ICONS[t as keyof typeof ICONS] : ICONS.lainnya), h('span', null, label));
+      // the icon shows which rarely-used tool is active; the label stays short so it never collides with Batal
+      mb.replaceChildren(svg(isMore ? ICONS[t as keyof typeof ICONS] : ICONS.lainnya), h('span', null, 'Alat'));
     }
     this.hideFloating();
     this.toggleMore(false);
@@ -315,6 +336,7 @@ export class Game {
     const m = this.els.moment;
     if (!m) return;
     m.textContent = text;
+    this.haptic(_kind === 'ibukota' || _kind === 'dikepung' ? [30, 50, 30] : 18);
     m.style.color = color;
     m.classList.remove('show');
     void m.offsetWidth;
@@ -513,6 +535,7 @@ export class Game {
     // drop invalid orders silently (they're shown red during planning)
     this.orders[this.current] = this.orders[this.current].filter((_, i) => this.validity[i]?.valid !== false);
     this.timerEnd = 0;
+    this.haptic(14);
     this.audio.sting('click');
     this.nextPlanner();
   }
@@ -609,6 +632,7 @@ export class Game {
   }
 
   private addOrder(o: Order) {
+    this.haptic(8);
     this.pushUndo();
     this.myOrders().push(o);
     this.afterOrdersChanged();
@@ -736,6 +760,7 @@ export class Game {
     const loopRec = recognize(raw, this.r.cam.zoom);
     if (this.tool === 'panah' && loopRec.shape === 'loop') { this.pincer(loopRec.pts); return; }
     if (bad) {
+      this.haptic([16, 40, 16]);
       this.toast(this.tool === 'panah' || this.tool === 'gerak' ? 'Mulai dari angka pasukanmu, lalu tarik ke tujuan' : 'Mulai dari provinsimu sendiri', 2400);
       return;
     }
@@ -760,7 +785,7 @@ export class Game {
         this.selectOrder(i);
         this.audio.sting('click');
         const v = this.validity[i];
-        if (v && !v.valid) this.toast('⚠ ' + v.reason, 2600);
+        if (v && !v.valid) this.toast(v.reason ?? 'Tidak valid', 2600);
         break;
       }
       case 'garis': {
@@ -895,12 +920,11 @@ export class Game {
     this.renderSheet();
   }
 
-  private buildMenu(p: number, sx: number, sy: number) {
+  buildMenu(p: number, sx: number, sy: number) {
     const bm = this.els.buildmenu;
     const s = this.state;
     const k = s.countries[this.current];
     const avail = k.treasury - pendingSpend(s, this.myOrders());
-    const icons: Record<BuildKind, string> = { pabrik: '🏭', pabrikMil: '⚙️', benteng: '🏰', pelabuhan: '⚓', kota: '🏙️', jalan: '🛤️' };
     const kinds: BuildKind[] = ['pabrik', 'pabrikMil', 'benteng', 'pelabuhan', 'kota'];
     bm.replaceChildren(...kinds.map((kind) => {
       const o: Order = { kind: 'bangun', prov: p, what: kind };
@@ -909,11 +933,11 @@ export class Game {
       return h('button', {
         disabled: !v.ok, title: v.reason ?? info.desc,
         onclick: () => { this.addOrder(o); this.hideFloating(); this.toast(`${info.name} diantrekan (${info.turns} giliran).`); },
-      }, h('span', null, icons[kind]), info.name, h('small', null, `${info.cost} · ${info.turns}g`));
+      }, iconEl(kind, 24), info.name, h('small', null, `${info.cost} · ${info.turns}g`));
     }), h('button', {
       disabled: avail < 6 * 10,
       onclick: () => { this.recruit(p, 10000); this.hideFloating(); },
-    }, h('span', null, '🪖'), 'Rekrut 10rb', h('small', null, `${RULES.recruitCostPer1000 * 10} kas`)));
+    }, iconEl('rekrut', 24), 'Rekrut 10rb', h('small', null, `${RULES.recruitCostPer1000 * 10} kas`)));
     bm.style.left = `${Math.max(150, Math.min(this.r.W - 150, sx))}px`;
     bm.style.top = `${Math.max(250, sy)}px`;
     bm.classList.remove('hidden');
@@ -922,7 +946,7 @@ export class Game {
   private recruit(p: number, amount: number) {
     const o: Order = { kind: 'rekrut', prov: p, amount };
     const v = validateOrder(this.map, this.state, this.current, o, this.myOrders());
-    if (!v.ok) { this.toast('⚠ ' + v.reason); return; }
+    if (!v.ok) { this.toast(v.reason ?? 'Tidak valid'); return; }
     const ex = this.myOrders().find((x) => x.kind === 'rekrut' && x.prov === p) as Extract<Order, { kind: 'rekrut' }> | undefined;
     if (ex) { this.pushUndo(); ex.amount += amount; this.afterOrdersChanged(); }
     else this.addOrder(o);
@@ -1095,18 +1119,18 @@ export class Game {
     const n = (p: number) => provinceName(this.map.params.seed, p);
     const s = this.state;
     switch (o.kind) {
-      case 'serang': return `⚔ Serang ${n(o.path[o.path.length - 1])} dari ${n(o.from)} (${o.frac * 100}%)`;
-      case 'gerak': return `➜ Gerak ke ${n(o.path[o.path.length - 1])} (${o.frac * 100}%)`;
-      case 'bertahan': return `🛡 Garis pertahanan ${o.provs.length} provinsi`;
-      case 'udara': return '✈ Misi udara';
-      case 'bangun': return `🏗 ${BUILD_INFO[o.what].name} di ${n(o.prov)}`;
-      case 'rekrut': return `🪖 Rekrut ${fmtCompact(o.amount)} di ${n(o.prov)}`;
-      case 'hangus': return `✖ Bumi hangus ${n(o.prov)}`;
-      case 'deklarasi': return `📜 Deklarasi perang ke ${s.countries[o.target].name}`;
-      case 'usul': return `✉ Usul ${PROPOSAL_NAME[o.what]} ke ${s.countries[o.to].name}`;
-      case 'jawab': return `✉ ${o.accept ? 'Terima' : 'Tolak'} usulan`;
-      case 'mata2': return `🕵 Mata-mata ke ${s.countries[o.target].name}`;
-      case 'event': return '📰 Respons peristiwa';
+      case 'serang': return `Serang ${n(o.path[o.path.length - 1])} dari ${n(o.from)} (${o.frac * 100}%)`;
+      case 'gerak': return `Gerak ke ${n(o.path[o.path.length - 1])} (${o.frac * 100}%)`;
+      case 'bertahan': return `Garis pertahanan ${o.provs.length} provinsi`;
+      case 'udara': return 'Misi udara';
+      case 'bangun': return `${BUILD_INFO[o.what].name} di ${n(o.prov)}`;
+      case 'rekrut': return `Rekrut ${fmtCompact(o.amount)} di ${n(o.prov)}`;
+      case 'hangus': return `Bumi hangus ${n(o.prov)}`;
+      case 'deklarasi': return `Deklarasi perang ke ${s.countries[o.target].name}`;
+      case 'usul': return `Usul ${PROPOSAL_NAME[o.what]} ke ${s.countries[o.to].name}`;
+      case 'jawab': return `${o.accept ? 'Terima' : 'Tolak'} usulan`;
+      case 'mata2': return `Mata-mata ke ${s.countries[o.target].name}`;
+      case 'event': return 'Respons peristiwa';
     }
   }
 
@@ -1144,22 +1168,22 @@ export class Game {
         return h('button', { class: 'btn small' + (sent ? ' on' : ''), onclick: () => this.propose(k.id, what) }, label);
       };
       const actions: HTMLElement[] = [];
-      if (r.status === 'perang') actions.push(propose('damai', '🕊 Damai'));
+      if (r.status === 'perang') actions.push(propose('damai', 'Damai'));
       else {
-        actions.push(h('button', { class: 'btn small danger' + (declared ? ' on' : ''), disabled: r.truce > 0, onclick: () => this.declare(k.id) }, declared ? 'Batal deklarasi' : '⚔ Nyatakan perang'));
+        actions.push(h('button', { class: 'btn small danger' + (declared ? ' on' : ''), disabled: r.truce > 0, onclick: () => this.declare(k.id) }, declared ? 'Batal deklarasi' : 'Nyatakan perang'));
         if (r.status !== 'aliansi') actions.push(propose('aliansi', 'Aliansi'));
         if (r.status === 'damai') actions.push(propose('nap', 'Non-agresi'));
         if (!r.trade) actions.push(propose('dagang', 'Dagang'));
       }
       const spied = my.some((o) => o.kind === 'mata2' && o.target === k.id);
-      actions.push(h('button', { class: 'btn small' + (spied ? ' on' : ''), title: `Intel 1 giliran (−${RULES.spyCost})`, onclick: () => this.spy(k.id) }, '🕵'));
+      actions.push(h('button', { class: 'btn small' + (spied ? ' on' : ''), title: `Intel 1 giliran (−${RULES.spyCost})`, onclick: () => this.spy(k.id) }, iconEl('mata2', 18)));
       body.append(h('div', { class: 'cty' },
         h('img', { class: 'flag', src: flagDataUrl(k.flag), alt: '' }),
         h('div', { class: 'nm' }, k.name, h('div', { class: 'muted', style: 'font-size:11px;font-weight:600' }, k.kind === 'manusia' ? 'Manusia' : k.kind === 'ai' ? `AI · ${k.personality}` : `Negara kecil · ${k.personality}`)),
         status, meter, h('div', { class: 'row' }, actions)));
     }
     const intel = s.intel[c];
-    if (intel && intel.turn === s.turn) body.append(h('div', { class: 'news' }, `🕵 Intel: perintah ${s.countries[intel.target].name} giliran lalu tampil samar di peta, dan kekuatannya terlihat.`));
+    if (intel && intel.turn === s.turn) body.append(h('div', { class: 'news' }, `Intel: perintah ${s.countries[intel.target].name} giliran lalu tampil samar di peta, dan kekuatannya terlihat.`));
   }
 
   private toggleOrder(match: (o: Order) => boolean, make: () => Order) {
@@ -1234,8 +1258,9 @@ export class Game {
       h('h2', null, 'Menu'),
       h('div', { class: 'row' },
         h('button', { class: 'btn', onclick: () => { const t = this.state.settings.theme === 'satelit' ? 'kartun' : 'satelit'; this.state.settings.theme = t; this.toast('Membangun tema…'); setTimeout(() => this.r.setTheme(t), 30); bg.remove(); } }, `Tema: ${this.state.settings.theme === 'satelit' ? 'Satelit' : 'Kartun'}`),
-        h('button', { class: 'btn', onclick: () => { this.audio.setMuted(!this.audio.muted); bg.remove(); } }, this.audio.muted ? '🔇 Suara mati' : '🔊 Suara'),
+        h('button', { class: 'btn', onclick: () => { this.audio.setMuted(!this.audio.muted); bg.remove(); } }, iconEl(this.audio.muted ? 'senyap' : 'suara', 18), this.audio.muted ? 'Suara mati' : 'Suara'),
         h('button', { class: 'btn', onclick: () => { this.colorblind = !this.colorblind; bg.remove(); } }, `Pola buta warna: ${this.colorblind ? 'on' : 'off'}`),
+        h('button', { class: 'btn', onclick: () => { this.haptics = !this.haptics; try { localStorage.setItem('garisdepan.haptic', this.haptics ? '1' : '0'); } catch { /* ignore */ } if (this.haptics) this.haptic(20); bg.remove(); } }, iconEl('getar', 18), `Getar: ${this.haptics ? 'on' : 'off'}`),
         h('button', { class: 'btn', onclick: () => { document.body.classList.toggle('lefty'); bg.remove(); } }, 'Mode kidal')),
       h('div', { class: 'row' },
         h('button', { class: 'btn', onclick: () => { bg.remove(); this.help(); } }, 'Cara main'),
@@ -1266,7 +1291,7 @@ export class Game {
     this.rec = new Recorder(this.canvas);
     if (this.rec.start()) {
       this.dir.restart(performance.now());
-      this.toast('⏺ Merekam resolusi (9:16)…');
+      this.toast('Merekam resolusi (9:16)…');
     }
     this.updatePlaybar();
   }
@@ -1307,6 +1332,14 @@ export class Game {
     this.lastT = now;
     if (!this.r) return;
     this.input?.tick(dt);
+    if (this.phase !== 'resolve') this.r.stepFlight(now);
+    // adaptive quality: long frames lower resolution and effect density, never the game logic
+    this.frameEma = this.frameEma * 0.94 + dt * 0.06;
+    if (this.frameEma > 28 && now - this.qualityCool > 3500 && this.r.quality > 0 && this.phase !== 'lobby') {
+      this.r.setQuality(this.r.quality - 1);
+      this.qualityCool = now;
+      this.frameEma = 17;
+    }
     // effects run on their own clock; during a replay the director advances it by playback speed
     if (this.phase !== 'resolve') this.r.fx.advance(dt);
     if (this.phase === 'lobby' && this.previewState && now > this.nextAmbient) {
