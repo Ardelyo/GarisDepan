@@ -1,8 +1,8 @@
 import { Rng } from '../core/rng';
 import type { GameMap } from '../map/types';
-import { stackCap } from './rules';
+import { UNIT_INFO, makeUnit, stackCap, syncTroops } from './rules';
 import type {
-  Country, CountryKind, FlagSpec, GameState, Personality, ProvState, Relation, Settings,
+  Country, CountryKind, FlagSpec, GameState, Personality, ProvState, Relation, Settings, UnitType,
 } from './types';
 
 export const PLAYER_COLORS = [
@@ -43,6 +43,9 @@ function makeCountry(id: number, name: string, color: string, kind: CountryKind,
     budget: { mil: 40, civ: 40, res: 20 },
     pin: null, alive: true, exiled: false, econStreak: 0, reputation: 0, casualties: 0, lastIncome: 0,
     pendingEvent: null,
+    reserve: 0,
+    unitSerial: { inf: 0, arm: 0, art: 0, mar: 0 },
+    groupSerial: 0,
   };
 }
 
@@ -182,12 +185,16 @@ export function newGame(map: GameMap, slots: PlayerSlot[], minors: number, setti
   );
 
   const state: GameState = {
-    version: 1,
+    version: 2,
     map: map.params,
     turn: 1,
     startDate: '2027-03-01',
     countries,
     provs,
+    units: [],
+    groups: [],
+    nextUnitId: 1,
+    nextGroupId: 1,
     rel,
     proposals: [],
     nextProposalId: 1,
@@ -215,7 +222,52 @@ export function newGame(map: GameMap, slots: PlayerSlot[], minors: number, setti
       mine.forEach((i, j) => (provs[i].troops += Math.floor((room[j] * k) / 100) * 100));
     }
   }
+  garrisonsToUnits(map, state, rng);
   return state;
+}
+
+/**
+ * Turn per-province troop numbers into divisions with a mixed order of battle:
+ * mostly infantry, armour and artillery near borders, marines on the coast.
+ */
+function garrisonsToUnits(map: GameMap, s: GameState, rng: Rng) {
+  const P = map.provinces;
+  s.units = [];
+  s.provs.forEach((p, i) => {
+    const T = p.troops;
+    if (T < 1000) return;
+    const border = P[i].neighbors.some((n) => s.provs[n].ctrl !== p.ctrl);
+    const k = Math.max(1, Math.round(T / 10000));
+    for (let j = 0; j < k; j++) {
+      const r = rng.next();
+      const minor = s.countries[p.ctrl].kind === 'minor';
+      let type: UnitType = 'inf';
+      if (!minor && border && r < 0.2) type = 'arm';
+      else if (!minor && r < (border ? 0.36 : 0.12)) type = 'art';
+      else if (P[i].coastal && r > 0.86) type = 'mar';
+      // a branch whose divisions are smaller than this garrison slice falls back to infantry
+      if (UNIT_INFO[type].maxStr < T / k) type = 'inf';
+      makeUnit(s, p.ctrl, type, i, Math.min(T / k, UNIT_INFO[type].maxStr), 1);
+    }
+  });
+  syncTroops(s);
+}
+
+/** Upgrade a version-1 save (troops per province) to divisions. */
+export function migrateState(map: GameMap, s: GameState): GameState {
+  if ((s as { version: number }).version >= 2 && Array.isArray(s.units)) return s;
+  for (const k of s.countries) {
+    k.reserve = k.reserve ?? 0;
+    k.unitSerial = k.unitSerial ?? { inf: 0, arm: 0, art: 0, mar: 0 };
+    k.groupSerial = k.groupSerial ?? 0;
+  }
+  s.units = [];
+  s.groups = [];
+  s.nextUnitId = 1;
+  s.nextGroupId = 1;
+  s.version = 2;
+  garrisonsToUnits(map, s, new Rng(s.rng ^ 0x2b));
+  return s;
 }
 
 export function dateOf(state: GameState, turn = state.turn): Date {

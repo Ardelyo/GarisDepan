@@ -2,7 +2,7 @@ import type { GameMap } from '../map/types';
 import { TERRAIN_INFO } from '../map/types';
 import type { Pt } from '../core/geom';
 import { distToPolyline } from '../core/geom';
-import type { BuildKind, GameState, Order, ProposalKind } from './types';
+import type { BuildKind, GameState, Order, ProposalKind, Unit, UnitType } from './types';
 
 /** Balancing constants — starting values, not real-world data. */
 export const RULES = {
@@ -37,6 +37,85 @@ export const RULES = {
   qualityCap: 1.5,
 };
 
+/**
+ * Division types. atk/def are multipliers on strength; armour is further modified by terrain
+ * (see unitAttack). Artillery supports attacks launched next to it; marines ignore the
+ * amphibious penalty.
+ */
+export const UNIT_INFO: Record<UnitType, {
+  name: string; short: string; maxStr: number; cost: number; speed: number; atk: number; def: number; desc: string;
+}> = {
+  inf: { name: 'Infanteri', short: 'INF', maxStr: 12000, cost: 70, speed: 1, atk: 1, def: 1, desc: 'Tulang punggung garis depan. Murah dan tangguh bertahan.' },
+  arm: { name: 'Lapis Baja', short: 'LB', maxStr: 9000, cost: 160, speed: 1.45, atk: 1.7, def: 1, desc: 'Cepat dan kuat menyerang di medan terbuka; lemah di gunung, hutan, dan kota.' },
+  art: { name: 'Artileri', short: 'ART', maxStr: 6000, cost: 110, speed: 0.85, atk: 0.5, def: 1.15, desc: 'Memperkuat serangan ke provinsi di sebelahnya (+12% per divisi) dan pertahanan.' },
+  mar: { name: 'Marinir', short: 'MAR', maxStr: 9000, cost: 120, speed: 1, atk: 1.05, def: 0.95, desc: 'Tanpa penalti pendaratan amfibi.' },
+};
+export const UNIT_TYPES: UnitType[] = ['inf', 'arm', 'art', 'mar'];
+
+/** Terrain penalty for armour (1 = open ground). */
+export function armourTerrain(map: GameMap, s: GameState, prov: number): number {
+  const t = map.provinces[prov].terrain;
+  let k = t === 'gunung' ? 0.45 : t === 'hutan' || t === 'bukit' || t === 'rawa' || t === 'hutanHujan' ? 0.62 : 1;
+  if (s.provs[prov].urban > 0) k *= 0.7;
+  return k;
+}
+
+/** Attack multiplier of a unit fighting into province `target`. */
+export function unitAttack(map: GameMap, s: GameState, u: Unit, target: number): number {
+  let m = UNIT_INFO[u.type].atk;
+  if (u.type === 'arm') m *= armourTerrain(map, s, target);
+  return m * (0.45 + 0.55 * u.org);
+}
+
+/** Defence multiplier of a unit holding its province. */
+export function unitDefense(map: GameMap, s: GameState, u: Unit): number {
+  let m = UNIT_INFO[u.type].def;
+  if (u.type === 'arm' && u.prov >= 0) m *= 0.6 + 0.4 * armourTerrain(map, s, u.prov);
+  return m * (0.45 + 0.55 * u.org);
+}
+
+/** Artillery support for an attack on `target`: own artillery standing in provinces bordering it. */
+export function artillerySupport(map: GameMap, s: GameState, c: number, target: number): number {
+  const adj = new Set(map.provinces[target].neighbors);
+  let k = 0;
+  for (const u of s.units) if (u.owner === c && u.type === 'art' && adj.has(u.prov)) k += u.str / UNIT_INFO.art.maxStr;
+  return 1 + Math.min(0.5, 0.12 * k);
+}
+
+/** Artillery dug in with the defenders. */
+export function artilleryDefense(units: Unit[]): number {
+  return 1 + Math.min(0.4, 0.15 * units.filter((u) => u.type === 'art').length);
+}
+
+export function unitsIn(s: GameState, prov: number): Unit[] {
+  return s.units.filter((u) => u.prov === prov);
+}
+
+export function unitById(s: GameState, id: number): Unit | undefined {
+  return s.units.find((u) => u.id === id);
+}
+
+/** Recompute province troop totals from units. */
+export function syncTroops(s: GameState) {
+  for (const p of s.provs) p.troops = 0;
+  for (const u of s.units) if (u.prov >= 0) s.provs[u.prov].troops += u.str;
+}
+
+const ROMAN = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X', 'XI', 'XII', 'XIII', 'XIV', 'XV', 'XVI', 'XVII', 'XVIII', 'XIX', 'XX'];
+export const roman = (n: number) => ROMAN[n - 1] ?? String(n);
+
+/** Create a fresh division owned by c in prov. */
+export function makeUnit(s: GameState, c: number, type: UnitType, prov: number, str = UNIT_INFO[type].maxStr, org = 1): Unit {
+  const k = s.countries[c];
+  k.unitSerial[type] = (k.unitSerial[type] ?? 0) + 1;
+  const u: Unit = {
+    id: s.nextUnitId++, owner: c, type, prov, str: Math.round(str), org, group: 0,
+    name: `${k.unitSerial[type]}. Div. ${UNIT_INFO[type].name}`,
+  };
+  s.units.push(u);
+  return u;
+}
+
 export const BUILD_INFO: Record<BuildKind, { name: string; cost: number; turns: number; desc: string }> = {
   pabrik: { name: 'Pabrik sipil', cost: 120, turns: 4, desc: '+PDB provinsi' },
   pabrikMil: { name: 'Pabrik militer', cost: 150, turns: 5, desc: 'Peralatan & penguatan otomatis' },
@@ -61,7 +140,7 @@ export function countryProvs(s: GameState, c: number): number[] {
 
 export function totalTroops(s: GameState, c: number): number {
   let t = 0;
-  for (const p of s.provs) if (p.ctrl === c) t += p.troops;
+  for (const u of s.units) if (u.owner === c) t += u.str;
   return t;
 }
 
@@ -257,8 +336,13 @@ export function validateOrder(map: GameMap, s: GameState, c: number, o: Order, p
     case 'gerak': {
       const src = s.provs[o.from];
       if (src.ctrl !== c) return { ok: false, reason: 'Bukan wilayahmu' };
-      if (src.troops < 100) return { ok: false, reason: 'Tidak ada pasukan' };
+      const us = o.units.map((id) => unitById(s, id));
+      if (!us.length || us.some((u) => !u || u.owner !== c || u.prov !== o.from)) return { ok: false, reason: 'Pilih unit di provinsi ini' };
+      if (pending.some((p) => (p.kind === 'serang' || p.kind === 'gerak') && p !== o && p.units.some((id) => o.units.includes(id))))
+        return { ok: false, reason: 'Unit sudah punya perintah lain' };
       if (o.path.length < 2) return { ok: false, reason: 'Rute terlalu pendek' };
+      if (o.kind === 'serang' && us.every((u) => u!.type === 'art') && o.path.some((b, i) => i > 0 && isSeaStep(map, o.path[i - 1], b)))
+        return { ok: false, reason: 'Artileri tidak bisa mendarat sendiri' };
       for (let i = 1; i < o.path.length; i++) {
         const a = o.path[i - 1], b = o.path[i];
         if (isSeaStep(map, a, b)) {
@@ -296,9 +380,13 @@ export function validateOrder(map: GameMap, s: GameState, c: number, o: Order, p
     case 'rekrut': {
       const p = s.provs[o.prov];
       if (p.owner !== c || p.ctrl !== c) return { ok: false, reason: 'Hanya di wilayah sendiri' };
-      const cost = (o.amount / 1000) * RULES.recruitCostPer1000;
-      if (me.treasury - spend < cost) return { ok: false, reason: 'Kas tidak cukup' };
-      if (totalTroops(s, c) + o.amount > manpowerCap(s, c)) return { ok: false, reason: 'Tenaga kerja habis' };
+      const info = UNIT_INFO[o.type];
+      if (me.treasury - spend < info.cost) return { ok: false, reason: 'Kas tidak cukup' };
+      const queued = pending.filter((x): x is Extract<Order, { kind: 'rekrut' }> => x.kind === 'rekrut' && x !== o)
+        .reduce((a, x) => a + UNIT_INFO[x.type].maxStr, 0);
+      if (totalTroops(s, c) + queued + info.maxStr > manpowerCap(s, c)) return { ok: false, reason: 'Tenaga kerja habis' };
+      if (o.type === 'mar' && !map.provinces[o.prov].coastal) return { ok: false, reason: 'Marinir butuh provinsi pesisir' };
+      if (o.type === 'arm' && !s.provs.some((q) => q.ctrl === c && q.milFactories > 0)) return { ok: false, reason: 'Butuh pabrik militer' };
       return { ok: true };
     }
     case 'hangus':
@@ -322,7 +410,7 @@ export function orderCost(o: Order): number {
   switch (o.kind) {
     case 'udara': return RULES.airCost;
     case 'mata2': return RULES.spyCost;
-    case 'rekrut': return (o.amount / 1000) * RULES.recruitCostPer1000;
+    case 'rekrut': return UNIT_INFO[o.type].cost;
     case 'bangun': return BUILD_INFO[o.what].cost * (o.what === 'jalan' ? o.path?.length ?? 1 : 1);
     default: return 0;
   }
@@ -338,11 +426,11 @@ export const PROPOSAL_NAME: Record<ProposalKind, string> = {
 
 /**
  * Planning-time estimate of attacker:defender strength for an attack order, including
- * other attacks this player has planned on the same target (pincer bonus too).
- * Returns null when the target's troops are hidden by fog of war.
+ * other attacks this player has planned on the same target: pincer bonus, artillery,
+ * armour terrain, organisation and marines. Returns null when the target is hidden by fog.
  */
 export function attackOdds(
-  map: GameMap, s: GameState, c: number, o: { from: number; path: number[]; frac: number }, pending: Order[] = [],
+  map: GameMap, s: GameState, c: number, o: { from: number; path: number[]; units: number[] }, pending: Order[] = [],
 ): { target: number; ratio: number | null } | null {
   const target = o.path.find((p, i) => i > 0 && !allied(s, c, s.provs[p].ctrl));
   if (target === undefined) return null;
@@ -352,21 +440,31 @@ export function attackOdds(
   const atk = [o, ...pending.filter((x): x is Extract<Order, { kind: 'serang' }> =>
     x.kind === 'serang' && x !== o && x.path.find((p, i) => i > 0 && !allied(s, c, s.provs[p].ctrl)) === target)];
   const seen = new Set<number>();
-  let a = 0;
   const froms = new Set<number>();
+  let a = 0;
   for (const x of atk) {
-    if (seen.has(x.from) && x !== o) continue;
-    seen.add(x.from);
     const last = x.path[x.path.indexOf(target) - 1] ?? x.from;
     froms.add(last);
-    const amphib = isSeaStep(map, last, target) ? RULES.amphibPenalty : 1;
-    a += s.provs[x.from].troops * x.frac * supplyCombat(sup[x.from]) * amphib;
+    const us = x.units.map((id) => unitById(s, id)).filter((u): u is Unit => !!u && !seen.has(u.id));
+    us.forEach((u) => seen.add(u.id));
+    a += columnAttack(map, s, us, target, isSeaStep(map, last, target)) * supplyCombat(sup[x.from]);
   }
-  a *= me.quality * (froms.size >= 2 ? RULES.pincerBonus : 1);
+  a *= me.quality * (froms.size >= 2 ? RULES.pincerBonus : 1) * artillerySupport(map, s, c, target);
   const tp = s.provs[target];
   const def = s.countries[tp.ctrl];
-  const d = Math.max(1, tp.troops) * (def?.quality ?? 1) * defenseMultiplier(map, s, target);
+  const defUnits = unitsIn(s, target);
+  const dRaw = defUnits.reduce((q, u) => q + u.str * unitDefense(map, s, u), 0);
+  const d = Math.max(1, dRaw) * (def?.quality ?? 1) * defenseMultiplier(map, s, target) * artilleryDefense(defUnits);
   return { target, ratio: a / d };
+}
+
+/** Raw attack value of a set of units into `target` (marines cancel the amphibious penalty pro rata). */
+export function columnAttack(map: GameMap, s: GameState, us: Unit[], target: number, amphibious: boolean): number {
+  const tot = us.reduce((q, u) => q + u.str, 0);
+  if (!tot) return 0;
+  const marShare = us.filter((u) => u.type === 'mar').reduce((q, u) => q + u.str, 0) / tot;
+  const amph = amphibious ? 1 - (1 - RULES.amphibPenalty) * (1 - marShare) : 1;
+  return us.reduce((q, u) => q + u.str * unitAttack(map, s, u, target), 0) * amph;
 }
 
 /** Rough military strength near a border, used by AI and UI hints. */

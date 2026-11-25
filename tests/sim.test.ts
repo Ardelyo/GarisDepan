@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { generateMap } from '../src/map/mapgen';
-import { newGame } from '../src/sim/setup';
+import { migrateState, newGame } from '../src/sim/setup';
 import { planAI } from '../src/sim/ai';
 import { resolveTurn } from '../src/sim/sim';
-import { RULES, SUPPLY_FULL, attackOdds, stackCap, supplyLevels, totalTroops } from '../src/sim/rules';
-import type { GameState, Settings } from '../src/sim/types';
+import { RULES, SUPPLY_FULL, UNIT_INFO, attackOdds, makeUnit, stackCap, supplyLevels, syncTroops, totalTroops, unitsIn } from '../src/sim/rules';
+import type { GameState, Order, Settings } from '../src/sim/types';
 
 const settings: Settings = {
   theme: 'satelit', tempo: 'santai', startAtWar: true, usePin: false, difficulty: 'perwira', fog: true,
@@ -79,7 +79,8 @@ describe('strategy rules (putaran 1)', () => {
   it('overcrowded provinces lose part of the excess', () => {
     const s = fresh();
     const cap = s.countries[0].capital;
-    s.provs[cap].troops = stackCap(map, s, cap) + 100000;
+    for (let k = 0; k < 10; k++) makeUnit(s, 0, 'inf', cap);
+    syncTroops(s);
     const after = resolveTurn(map, s, s.countries.map(() => [])).state;
     expect(after.provs[cap].troops).toBeLessThan(s.provs[cap].troops - 10000);
   });
@@ -103,11 +104,63 @@ describe('strategy rules (putaran 1)', () => {
     const t = P.findIndex((p, i) => s.provs[i].ctrl === 1 && p.neighbors.filter((n) => s.provs[n].ctrl === 0).length >= 2);
     if (t < 0) return;
     const [a, b] = P[t].neighbors.filter((n) => s.provs[n].ctrl === 0);
-    s.provs[a].troops = s.provs[b].troops = 20000;
-    const o1 = { kind: 'serang' as const, from: a, path: [a, t], frac: 1 as const };
-    const o2 = { kind: 'serang' as const, from: b, path: [b, t], frac: 1 as const };
+    makeUnit(s, 0, 'inf', a);
+    makeUnit(s, 0, 'inf', b);
+    syncTroops(s);
+    const o1 = { kind: 'serang' as const, from: a, path: [a, t], units: unitsIn(s, a).map((u) => u.id) };
+    const o2 = { kind: 'serang' as const, from: b, path: [b, t], units: unitsIn(s, b).map((u) => u.id) };
     const single = attackOdds(map, s, 0, o1)!.ratio!;
     const both = attackOdds(map, s, 0, o1, [o1, o2])!.ratio!;
     expect(both).toBeGreaterThan(single * 2);
+  });
+});
+
+describe('divisions (revamp)', () => {
+  const map = generateMap({ seed: 5, shape: 'benua', size: 'sedang' });
+  const base = () => newGame(map, [
+    { name: 'A', kind: 'ai', color: 0 }, { name: 'B', kind: 'ai', color: 1 },
+  ], 2, settings);
+
+  it('starts with a mixed order of battle that matches province troops', () => {
+    const s = base();
+    const types = new Set(s.units.filter((u) => u.owner === 0).map((u) => u.type));
+    expect(types.has('inf')).toBe(true);
+    expect(types.size).toBeGreaterThanOrEqual(2);
+    for (const u of s.units) expect(u.str).toBeLessThanOrEqual(UNIT_INFO[u.type].maxStr + 1);
+    s.provs.forEach((p, i) => expect(p.troops).toBe(unitsIn(s, i).reduce((a, u) => a + u.str, 0)));
+  });
+
+  it('moves only the ordered divisions and they arrive', () => {
+    const s = base();
+    const src = s.provs.findIndex((p, i) => p.ctrl === 0 && unitsIn(s, i).length >= 2 &&
+      map.provinces[i].neighbors.some((n) => s.provs[n].ctrl === 0));
+    if (src < 0) return;
+    const dst = map.provinces[src].neighbors.find((n) => s.provs[n].ctrl === 0)!;
+    const [u1, u2] = unitsIn(s, src);
+    const orders = s.countries.map(() => [] as Order[]);
+    orders[0] = [{ kind: 'gerak', from: src, path: [src, dst], units: [u1.id] }];
+    const next = resolveTurn(map, s, orders).state;
+    expect(next.units.find((u) => u.id === u1.id)?.prov).toBe(dst);
+    expect(next.units.find((u) => u.id === u2.id)?.prov).toBe(src);
+  });
+
+  it('recruiting creates a division of the requested type', () => {
+    const s = base();
+    s.countries[0].treasury = 1000;
+    const cap = s.countries[0].capital;
+    const orders = s.countries.map(() => [] as Order[]);
+    orders[0] = [{ kind: 'rekrut', prov: cap, type: 'art' }];
+    const before = s.units.filter((u) => u.owner === 0 && u.type === 'art').length;
+    const next = resolveTurn(map, s, orders).state;
+    expect(next.units.filter((u) => u.owner === 0 && u.type === 'art').length).toBe(before + 1);
+  });
+
+  it('migrates a version-1 save into divisions', () => {
+    const s = base() as unknown as Record<string, unknown>;
+    const old = JSON.parse(JSON.stringify(s));
+    delete old.units; delete old.groups; old.version = 1;
+    const m = migrateState(map, old);
+    expect(m.version).toBe(2);
+    expect(m.units.length).toBeGreaterThan(0);
   });
 });

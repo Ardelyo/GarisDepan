@@ -43,4 +43,8 @@ export const ICONS = {
   cam: '<rect x="3" y="7" width="13" height="10" rx="2"/><path d="M16 11 L21 8 V16 L16 13"/>',
   rec: '<circle cx="12" cy="12" r="7" fill="currentColor"/>',
   trash: '<path d="M4 7 H20 M9 7 V4 H15 V7 M6 7 L7 21 H17 L18 7"/>',
+  more: '<circle cx="5" cy="12" r="1.4" fill="currentColor"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/><circle cx="19" cy="12" r="1.4" fill="currentColor"/>',
+  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11 V16.5 M12 7.6 V7.5"/>',
+  group: '<rect x="3" y="5" width="9" height="6" rx="1"/><rect x="12" y="13" width="9" height="6" rx="1"/><path d="M7.5 11 V16 H12"/>',
+  close: '<path d="M6 6 L18 18 M18 6 L6 18"/>',
 };

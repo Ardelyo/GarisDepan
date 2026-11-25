@@ -1,12 +1,13 @@
-import { clamp, easeInOut, lerp, type Pt } from '../core/geom';
+import { clamp, easeInOut, lerp } from '../core/geom';
 import type { GameMap } from '../map/types';
-import type { ColSnap, GameState, Resolution, SimEvent } from '../sim/types';
-import type { AnnexAnim, ColView, Renderer } from './renderer';
+import type { ColSnap, GameState, Resolution, SimEvent, Unit } from '../sim/types';
+import type { AnnexAnim, ColView, Renderer, UnitView } from './renderer';
 
 export interface DirectorFrame {
   troops: number[];
   ctrl: number[];
   cols: ColView[];
+  units: UnitView[];
   annex: AnnexAnim[];
   flash: Map<number, number>;
   spotlight: { x: number; y: number; t0: number } | null;
@@ -14,9 +15,12 @@ export interface DirectorFrame {
   done: boolean;
 }
 
+interface Capture { prov: number; from: number; to: number; ex: number; ey: number; col: number; t: number }
+
 /**
- * Replays a resolution log as a cinematic: interpolates columns & counters per day,
- * fires effects, and drives an automatic "director" camera.
+ * Replays a resolution log as a cinematic: interpolates columns & stacks per day, spreads
+ * captured territory along the advancing column, fires effects, and drives an automatic
+ * "director" camera that stays on one story for a couple of days.
  */
 export class Director {
   dayDur = 1700;
@@ -27,15 +31,16 @@ export class Director {
   private lastNow = 0;
   private res!: Resolution;
   private prev!: GameState;
+  private meta = new Map<number, Unit>();
   private firedDay = -1;
   private firedCapture = new Set<string>();
   private firedMoment = new Set<string>();
-  private annex: AnnexAnim[] = [];
+  private captures: Capture[] = [];
   private flash = new Map<number, number>();
-  private capturedAt = new Map<number, { to: number; t: number }>();
   private battles: { x: number; y: number; size: number }[] = [];
   private lastBoom = 0;
   private spotlight: DirectorFrame['spotlight'] = null;
+  private focusUntil = 0;
   private camAnim: { from: { x: number; y: number; zoom: number }; to: { x: number; y: number; zoom: number }; t0: number; dur: number } | null = null;
 
   onMoment?: (text: string, color: string, kind: string) => void;
@@ -48,9 +53,17 @@ export class Director {
     return (this.res.frames.length - 1) * this.dayDur + 900;
   }
 
-  start(prev: GameState, res: Resolution, now: number) {
+  /** How long (director time) a captured province takes to fill with the new colour. */
+  private get annexDur() {
+    return this.dayDur * 1.35;
+  }
+
+  start(prev: GameState, res: Resolution, now: number, next?: GameState) {
     this.prev = prev;
     this.res = res;
+    this.meta.clear();
+    for (const u of prev.units) this.meta.set(u.id, u);
+    if (next) for (const u of next.units) if (!this.meta.has(u.id)) this.meta.set(u.id, u);
     this.restart(now);
   }
 
@@ -60,12 +73,12 @@ export class Director {
     this.firedDay = -1;
     this.firedCapture.clear();
     this.firedMoment.clear();
-    this.annex = [];
+    this.captures = [];
     this.flash.clear();
-    this.capturedAt.clear();
     this.battles = [];
     this.spotlight = null;
     this.camAnim = null;
+    this.focusUntil = 0;
     this.r.fx.clear();
     this.paused = false;
   }
@@ -81,18 +94,25 @@ export class Director {
     this.camAnim = { from: { ...c }, to: { x, y, zoom }, t0: now, dur };
   }
 
-  private uOf(route: Pt[], segs: number, idx: number, prog: number): number {
-    // route built with 10 samples per segment (Catmull–Rom), convert to length fraction
-    const fi = clamp((idx + prog) * 10, 0, route.length - 1);
-    let total = 0, upto = 0;
-    for (let i = 1; i < route.length; i++) {
-      const l = Math.hypot(route[i].x - route[i - 1].x, route[i].y - route[i - 1].y);
-      if (i <= Math.floor(fi)) upto += l;
-      else if (i === Math.floor(fi) + 1) upto += l * (fi - Math.floor(fi));
-      total += l;
-    }
-    void segs;
-    return total ? upto / total : 0;
+  private colView(cb: ColSnap, ca: ColSnap | undefined, f: number): ColView | null {
+    if (ca?.gone) return null;
+    const info = this.r.routeInfo(cb.path, cb.stroke);
+    const samePath = ca && ca.path.join() === cb.path.join();
+    const ub = this.r.uAt(info, cb.idx, cb.prog);
+    const ua = ca && samePath ? this.r.uAt(info, ca.idx, ca.prog) : ub;
+    let alpha = 1;
+    if (cb.gone) alpha = 1 - f;
+    else if (!ca) alpha = Math.min(1, f * 3);
+    return {
+      owner: cb.owner,
+      route: info.pts,
+      u: lerp(ua, ub, easeInOut(f)),
+      troops: Math.round(lerp(ca?.troops ?? cb.troops, cb.troops, f)),
+      fighting: cb.fighting,
+      kind: cb.kind,
+      alpha,
+      types: cb.types,
+    };
   }
 
   update(now: number): DirectorFrame {
@@ -114,29 +134,31 @@ export class Director {
       if (d === 1) this.fireEvents(frames[0].events, now);
       this.fireEvents(B.events, now);
       for (let i = 0; i < B.troops.length; i++) if (B.troops[i] < A.troops[i] * 0.8 && A.troops[i] > 1000) this.flash.set(i, now);
-      if (this.autoCam) {
+      if (this.autoCam && this.t >= this.focusUntil) {
         const big = B.events.filter((e): e is Extract<SimEvent, { t: 'battle' }> => e.t === 'battle').sort((a, b) => b.size - a.size)[0];
         const fit = Math.min(this.r.W / this.map.w, this.r.H / this.map.h);
-        if (big) this.focus(big.x, big.y, clamp(fit * 2.3, fit, 1.5), now);
-        else {
+        if (big) {
+          this.focus(big.x, big.y, clamp(fit * 2.3, fit, 1.5), now, 650);
+          this.focusUntil = this.t + this.dayDur * 1.9; // stay on this story ~2 days
+        } else {
           const moving = B.cols.filter((c) => !c.gone);
           if (moving.length) {
             let sx = 0, sy = 0;
             for (const c of moving) { const p = this.map.provinces[c.path[Math.min(c.idx + 1, c.path.length - 1)]]; sx += p.x; sy += p.y; }
-            this.focus(sx / moving.length, sy / moving.length, clamp(fit * 1.6, fit, 1.2), now);
+            this.focus(sx / moving.length, sy / moving.length, clamp(fit * 1.6, fit, 1.2), now, 650);
           }
         }
       }
     }
 
-    // ---- captures mid-day ----
+    // ---- captures & moments mid-day ----
     for (const e of B.events) {
       if (e.t === 'capture' && f >= 0.45) {
         const key = d + ':' + e.prov;
         if (!this.firedCapture.has(key)) {
           this.firedCapture.add(key);
-          this.capturedAt.set(e.prov, { to: e.to, t: this.t });
-          this.annex.push({ prov: e.prov, from: e.from, to: e.to, ex: e.ex, ey: e.ey, t0: now, dur: 750 });
+          this.captures = this.captures.filter((c) => c.prov !== e.prov);
+          this.captures.push({ prov: e.prov, from: e.from, to: e.to, ex: e.ex, ey: e.ey, col: e.col, t: this.t });
           this.onSound?.('capture', 1);
         }
       }
@@ -148,7 +170,10 @@ export class Director {
           this.onSound?.('moment', 1);
           if (e.kind === 'ibukota' || e.kind === 'dikepung') {
             this.spotlight = { x: e.x, y: e.y, t0: now };
-            if (this.autoCam) this.focus(e.x, e.y, Math.min(2.2, this.r.cam.zoom * 1.3), now, 500);
+            if (this.autoCam) {
+              this.focus(e.x, e.y, Math.min(2.2, this.r.cam.zoom * 1.3), now, 500);
+              this.focusUntil = this.t + this.dayDur * 1.2;
+            }
           }
         }
       }
@@ -179,39 +204,60 @@ export class Director {
       if (k >= 1) { this.camAnim = null; this.r.motionBlur = 0; }
     } else this.r.motionBlur = 0;
 
-    // ---- interpolated state ----
-    const troops = A.troops.map((a, i) => Math.round(lerp(a, B.troops[i], easeInOut(f))));
-    const ctrl = A.ctrl.slice();
-    this.capturedAt.forEach((c, p) => (ctrl[p] = c.to));
-    if (this.t >= this.total - 1) for (let i = 0; i < ctrl.length; i++) ctrl[i] = B.ctrl[i];
-
+    // ---- columns ----
     const byId = new Map<number, ColSnap>();
     for (const c of A.cols) byId.set(c.id, c);
     const cols: ColView[] = [];
+    const colById = new Map<number, ColView>();
     for (const cb of B.cols) {
-      const ca = byId.get(cb.id);
-      const samePath = ca && ca.path.join() === cb.path.join();
-      const route = this.r.route(cb.path);
-      const segs = cb.path.length - 1;
-      const ub = this.uOf(route, segs, cb.idx, cb.prog);
-      const ua = ca && samePath ? this.uOf(route, segs, ca.idx, ca.prog) : ub;
-      if (ca?.gone) continue;
-      let alpha = 1;
-      if (cb.gone) alpha = 1 - f;
-      else if (!ca) alpha = Math.min(1, f * 3);
-      cols.push({
-        owner: cb.owner,
-        route,
-        u: lerp(ua, ub, easeInOut(f)),
-        troops: Math.round(lerp(ca?.troops ?? cb.troops, cb.troops, f)),
-        fighting: cb.fighting,
-        kind: cb.kind,
-        alpha,
-      });
+      const v = this.colView(cb, byId.get(cb.id), f);
+      if (!v) continue;
+      cols.push(v);
+      colById.set(cb.id, v);
     }
-    this.annex = this.annex.filter((a) => now - a.t0 < a.dur + 600);
+
+    // ---- territory: spreads along the capturing column, border moves once it's filled ----
+    const done = this.t >= this.total - 1;
+    const ctrl = A.ctrl.slice();
+    const annex: AnnexAnim[] = [];
+    for (const cap of this.captures) {
+      const k = (this.t - cap.t) / this.annexDur;
+      if (k >= 1) ctrl[cap.prov] = cap.to;
+      if (k >= 1.35) continue;
+      const an: AnnexAnim = { prov: cap.prov, from: cap.from, to: cap.to, ex: cap.ex, ey: cap.ey, k: Math.max(0, k) };
+      const snap = B.cols.find((c) => c.id === cap.col) ?? A.cols.find((c) => c.id === cap.col);
+      if (snap) {
+        const qi = snap.path.indexOf(cap.prov);
+        if (qi > 0) {
+          const info = this.r.routeInfo(snap.path, snap.stroke);
+          const u0 = this.r.uAt(info, qi - 1, 0.5);
+          const uMid = info.knots[qi];
+          const live = colById.get(cap.col);
+          // the colour front follows the column, and always reaches the centre as k grows
+          an.route = info.pts;
+          an.u0 = u0;
+          an.u = Math.max(live && live.route === info.pts ? live.u : u0, lerp(u0, uMid, clamp(k * 1.25, 0, 1)));
+        }
+      }
+      annex.push(an);
+    }
+    if (done) for (let i = 0; i < ctrl.length; i++) ctrl[i] = B.ctrl[i];
+
+    // ---- stacks ----
+    const src = f < 0.5 ? A : B;
+    const other = new Map((f < 0.5 ? B : A).units.map((u) => [u.id, u.str]));
+    const units: UnitView[] = [];
+    for (const us of src.units) {
+      const m = this.meta.get(us.id);
+      if (!m) continue;
+      const o = other.get(us.id);
+      const str = o === undefined ? us.str : f < 0.5 ? lerp(us.str, o, easeInOut(f)) : lerp(o, us.str, easeInOut(f));
+      units.push({ id: us.id, owner: m.owner, type: m.type, prov: us.prov, str: Math.round(str), org: m.org, group: m.group });
+    }
+
+    const troops = A.troops.map((a, i) => Math.round(lerp(a, B.troops[i], easeInOut(f))));
     return {
-      troops, ctrl, cols, annex: this.annex, flash: this.flash, spotlight: this.spotlight,
+      troops, ctrl, cols, units, annex, flash: this.flash, spotlight: this.spotlight,
       day: Math.min(nDays, Math.floor(tt)), done: this.t >= this.total,
     };
   }
