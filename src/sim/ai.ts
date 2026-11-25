@@ -1,9 +1,10 @@
 import { Rng } from '../core/rng';
 import type { GameMap } from '../map/types';
 import {
-  BUILD_INFO, RULES, allied, atWar, defenseMultiplier, findPath, manpowerCap, stackCap, totalTroops,
+  BUILD_INFO, RULES, UNIT_INFO, allied, artilleryDefense, artillerySupport, atWar, columnAttack, defenseMultiplier,
+  findPath, isSeaStep, manpowerCap, stackCap, totalTroops, unitDefense,
 } from './rules';
-import type { Frac, GameState, Order, Proposal } from './types';
+import type { GameState, Order, Proposal, Unit, UnitType } from './types';
 
 /** Utility AI: same order format as human players, no cheating on orders. */
 
@@ -95,96 +96,127 @@ export function planAI(map: GameMap, s: GameState, c: number): Order[] {
   const hostile = (i: number) => enemies.includes(s.provs[i].ctrl);
   const enemyAdj = (i: number) => P[i].neighbors.filter(hostile);
   const front = mine.filter((i) => enemyAdj(i).length > 0);
-  const avail = new Map<number, number>();
-  for (const i of mine) avail.set(i, s.provs[i].troops);
+  const myUnits = s.units.filter((u) => u.owner === c);
+  const free = new Set(myUnits.map((u) => u.id));
+  const freeAt = (i: number) => myUnits.filter((u) => u.prov === i && free.has(u.id));
+  const strOf = (us: Unit[]) => us.reduce((a, u) => a + u.str, 0);
   const threat = (i: number) => enemyAdj(i).reduce((a, n) => a + s.provs[n].troops, 0) / Math.max(1, s.provs[i].troops);
   // projected garrison after this turn's moves, to respect stacking limits
   const projected = new Map<number, number>();
   for (const i of mine) projected.set(i, s.provs[i].troops);
   const room = (i: number) => stackCap(map, s, i) - (projected.get(i) ?? 0);
+  const take = (us: Unit[], from: number) => {
+    for (const u of us) free.delete(u.id);
+    projected.set(from, (projected.get(from) ?? 0) - strOf(us));
+  };
 
-  // attacks: enemy provinces bordering us, weakest first
+  // attacks: enemy provinces bordering us, best value per defence first
   const targets = new Set<number>();
   for (const i of front) for (const n of enemyAdj(i)) targets.add(n);
   const scored = [...targets].map((q) => {
-    const deff = Math.max(1, s.provs[q].troops) * defenseMultiplier(map, s, q) * (s.countries[s.provs[q].ctrl]?.quality ?? 1);
+    const dus = s.units.filter((u) => u.prov === q);
+    const deff = Math.max(1, dus.reduce((a, u) => a + u.str * unitDefense(map, s, u), 0)) * defenseMultiplier(map, s, q) *
+      (s.countries[s.provs[q].ctrl]?.quality ?? 1) * artilleryDefense(dus);
     const value = s.provs[q].pop / 1000 + (s.countries[s.provs[q].ctrl]?.capital === q ? 5 : 0) + (s.provs[q].owner === c ? 3 : 0);
     return { q, deff, value };
   }).sort((a, b) => b.value / b.deff - a.value / a.deff);
   let group = 1;
   for (const t of scored) {
-    const srcs = P[t.q].neighbors.filter((n) => s.provs[n].ctrl === c && (avail.get(n) ?? 0) > 1500);
-    if (!srcs.length) continue;
-    let pot = 0;
-    for (const n of srcs) pot += (avail.get(n) ?? 0) * 0.75;
-    pot *= me.quality * skill;
+    const plan: { from: number; units: Unit[] }[] = [];
+    for (const n of P[t.q].neighbors) {
+      if (s.provs[n].ctrl !== c) continue;
+      const here = freeAt(n);
+      if (!here.length || strOf(here) < 1500) continue;
+      // threatened provinces keep a division (preferably infantry/artillery) behind
+      let send = here;
+      if (threat(n) > 0.8 && here.length > 1) {
+        const keep = here.slice().sort((a, b) => (a.type === 'arm' ? 1 : 0) - (b.type === 'arm' ? 1 : 0) || b.str - a.str)[0];
+        send = here.filter((u) => u !== keep);
+      } else if (threat(n) > 0.8 && me.personality !== 'agresif') continue;
+      // artillery supports from where it stands instead of attacking
+      send = send.filter((u) => u.type !== 'art');
+      if (send.length) plan.push({ from: n, units: send });
+    }
+    if (!plan.length) continue;
+    const pincer = plan.length >= 2 ? RULES.pincerBonus : 1;
+    const pot = plan.reduce((a, p) => a + columnAttack(map, s, p.units, t.q, isSeaStep(map, p.from, t.q)), 0) *
+      me.quality * skill * pincer * artillerySupport(map, s, c, t.q);
     const need = t.deff * (me.personality === 'agresif' ? 1.15 : 1.35);
     if (pot < need) continue;
-    for (const n of srcs) {
-      const frac: Frac = threat(n) > 0.8 ? 0.5 : 1;
-      const keep = frac === 1 ? 0 : 0.5;
-      orders.push({ kind: 'serang', from: n, path: [n, t.q], frac, group });
-      avail.set(n, (avail.get(n) ?? 0) * keep);
-      projected.set(n, (projected.get(n) ?? 0) * keep);
+    for (const p of plan) {
+      orders.push({ kind: 'serang', from: p.from, path: [p.from, t.q], units: p.units.map((u) => u.id), group });
+      take(p.units, p.from);
     }
     group++;
   }
 
-  // reinforcement: interior troops flow to the most threatened front province
+  // reinforcement: interior divisions flow to the most threatened front provinces with room
+  const moves = new Map<string, { from: number; path: number[]; units: Unit[] }>();
+  const addMove = (from: number, dest: number, u: Unit) => {
+    const key = from + '>' + dest;
+    let m = moves.get(key);
+    if (!m) {
+      const path = findPath(map, s, c, from, dest, { attack: false });
+      if (!path || path.length < 2) return false;
+      m = { from, path, units: [] };
+      moves.set(key, m);
+    }
+    m.units.push(u);
+    take([u], from);
+    projected.set(dest, (projected.get(dest) ?? 0) + u.str);
+    return true;
+  };
   if (front.length) {
     const ranked = front.slice().sort((a, b) => threat(b) - threat(a));
     for (const i of mine) {
-      if (front.includes(i) || (avail.get(i) ?? 0) < 2000) continue;
-      if (i === me.capital && enemies.length === 0) continue;
-      const frac: Frac = i === me.capital ? 0.5 : (avail.get(i) ?? 0) > 2 * Math.max(2000, room(ranked[0])) ? 0.5 : 1;
-      const amt = (avail.get(i) ?? 0) * frac;
-      let dest = -1, bd = Infinity;
-      for (const f of ranked) {
-        if (room(f) < Math.min(amt, 4000)) continue;
-        const d = Math.hypot(P[f].x - P[i].x, P[f].y - P[i].y) / (1 + threat(f));
-        if (d < bd) { bd = d; dest = f; }
-      }
-      if (dest < 0) continue;
-      const path = findPath(map, s, c, i, dest, { attack: false });
-      if (path && path.length >= 2) {
-        orders.push({ kind: 'gerak', from: i, path, frac });
-        avail.set(i, (avail.get(i) ?? 0) - amt);
-        projected.set(i, (projected.get(i) ?? 0) - amt);
-        projected.set(dest, (projected.get(dest) ?? 0) + amt);
+      if (front.includes(i)) continue;
+      const here = freeAt(i).sort((a, b) => b.str - a.str);
+      // the capital keeps one division
+      const movable = i === me.capital ? here.slice(1) : here;
+      for (const u of movable) {
+        let dest = -1, bd = Infinity;
+        for (const f of ranked) {
+          if (room(f) < u.str * 0.8) continue;
+          const d = Math.hypot(P[f].x - P[i].x, P[f].y - P[i].y) / (1 + threat(f));
+          if (d < bd) { bd = d; dest = f; }
+        }
+        if (dest < 0) break;
+        addMove(i, dest, u);
       }
     }
   } else if (enemies.length === 0) {
-    // peacetime: spread troops toward borders with other countries
+    // peacetime: spread divisions toward borders with other countries
     const border = mine.filter((i) => P[i].neighbors.some((n) => s.provs[n].ctrl !== c && !allied(s, c, s.provs[n].ctrl)));
     for (const i of mine) {
-      if (border.includes(i) || i === me.capital || s.provs[i].troops < 5000 || !border.length) continue;
-      if (!rng.chance(0.3)) continue;
+      if (border.includes(i) || i === me.capital || !border.length) continue;
+      const here = freeAt(i);
+      if (here.length < 2 || !rng.chance(0.3)) continue;
+      const u = here[0];
       const dest = border[Math.floor(rng.next() * border.length)];
-      const amt = s.provs[i].troops * 0.5;
-      if (room(dest) < amt) continue;
-      const path = findPath(map, s, c, i, dest, { attack: false });
-      if (path) {
-        orders.push({ kind: 'gerak', from: i, path, frac: 0.5 });
-        projected.set(dest, (projected.get(dest) ?? 0) + amt);
-      }
+      if (room(dest) < u.str) continue;
+      addMove(i, dest, u);
     }
   }
+  moves.forEach((m) => orders.push({ kind: 'gerak', from: m.from, path: m.path, units: m.units.map((u) => u.id) }));
 
   // ---- economy ----
   let money = me.treasury;
   const cap = manpowerCap(s, c);
   let troops = totalTroops(s, c);
+  const hasMil = s.provs.some((p) => p.ctrl === c && p.milFactories > 0);
   if (enemies.length && front.length) {
     const ranked = front.slice().sort((a, b) => threat(b) - threat(a));
     for (const f of ranked.slice(0, 3)) {
       if (s.provs[f].owner !== c) continue;
-      const amount = Math.min(30000, Math.floor((money * 0.5) / RULES.recruitCostPer1000) * 1000, Math.floor((cap - troops) / 1000) * 1000,
-        Math.floor(room(f) / 1000) * 1000);
-      if (amount < 5000) continue;
-      orders.push({ kind: 'rekrut', prov: f, amount });
-      projected.set(f, (projected.get(f) ?? 0) + amount);
-      money -= (amount / 1000) * RULES.recruitCostPer1000;
-      troops += amount;
+      const r = rng.next();
+      let type: UnitType = hasMil && r < 0.25 ? 'arm' : r < 0.45 ? 'art' : 'inf';
+      if (type === 'inf' && P[f].coastal && rng.chance(0.15)) type = 'mar';
+      const info = UNIT_INFO[type];
+      if (money * 0.6 < info.cost || troops + info.maxStr > cap || room(f) < info.maxStr * 0.8) continue;
+      orders.push({ kind: 'rekrut', prov: f, type });
+      projected.set(f, (projected.get(f) ?? 0) + info.maxStr);
+      money -= info.cost;
+      troops += info.maxStr;
     }
     const hot = ranked[0];
     if (hot !== undefined && s.provs[hot].owner === c && s.provs[hot].fort < 2 && s.provs[hot].queue.length === 0 && money > BUILD_INFO.benteng.cost + 50) {

@@ -3,21 +3,22 @@ import { distToPolyline, pointAlong, simplify, type Pt } from './core/geom';
 import { provinceName } from './core/names';
 import { generateMap } from './map/mapgen';
 import { RESOURCE_NAME, TERRAIN_INFO, type GameMap } from './map/types';
-import { Renderer, fmtCompact, type DrawnOrder, type View } from './render/renderer';
+import { Renderer, fmtCompact, type DrawnOrder, type UnitView, type View } from './render/renderer';
+import { BUILD_ICON_D, TYPE_ORDER, unitSymbolSvg } from './render/symbols';
 import { Director, type DirectorFrame } from './render/director';
 import { Recorder } from './render/record';
 import { flagDataUrl } from './render/flags';
 import { Input } from './input/input';
 import { boundingCircle, pointInPoly, recognize } from './input/stroke';
 import { Audio } from './audio/audio';
-import { newGame, dateOf, fmtDate } from './sim/setup';
+import { newGame, dateOf, fmtDate, migrateState } from './sim/setup';
 import {
-  BUILD_INFO, PROPOSAL_NAME, RULES, SUPPLY_CUT, SUPPLY_FULL, atWar, allied, attackOdds, countryGdp, findPath,
-  manpowerCap, pendingSpend, stackCap, supplyLevels, totalTroops, validateOrder, visibleSet,
+  BUILD_INFO, PROPOSAL_NAME, RULES, SUPPLY_CUT, SUPPLY_FULL, UNIT_INFO, UNIT_TYPES, atWar, allied, attackOdds, countryGdp,
+  findPath, manpowerCap, pendingSpend, roman, stackCap, supplyLevels, totalTroops, unitById, unitsIn, validateOrder, visibleSet,
 } from './sim/rules';
 import { planAI } from './sim/ai';
 import { resolveTurn, fmtInt, scoreOf } from './sim/sim';
-import type { BuildKind, Frac, GameState, Order, ProposalKind, Resolution } from './sim/types';
+import type { BuildKind, GameState, Order, ProposalKind, Resolution, Unit, UnitType } from './sim/types';
 import { buildLobby, type LobbyConfig } from './ui/lobby';
 import { h, svg, ICONS } from './ui/dom';
 
@@ -48,7 +49,9 @@ export class Game {
   undoStack: Order[][] = [];
   redoStack: Order[][] = [];
   tool: Tool = 'panah';
-  frac: Frac = 0.5;
+  /** Divisions currently selected by the planning player. */
+  selected = new Set<number>();
+  moreOpen = false;
   tab: Tab = 'provinsi';
   sheetOpen = false;
   selectedProv = -1;
@@ -100,7 +103,7 @@ export class Game {
       strokeCancel: () => { this.draft = null; this.audio.stopScribble(); },
       tap: (x, y) => this.tap(x, y),
       longPress: (x, y) => this.longPress(x, y),
-      wheelDuringStroke: (d) => { this.frac = d > 0 ? (this.frac === 1 ? 0.5 : 0.25) : this.frac === 0.25 ? 0.5 : 1; this.toast(`Kekuatan panah: ${this.frac * 100}%`); },
+      wheelDuringStroke: () => { /* strength is chosen by selecting divisions */ },
       threeFingerSwipe: (d) => (d < 0 ? this.undo() : this.redo()),
       onCameraMove: () => this.hideFloating(),
     });
@@ -139,8 +142,8 @@ export class Game {
   private loadSave() {
     try {
       const data = JSON.parse(localStorage.getItem(SAVE_KEY)!);
-      const s = data.state as GameState;
-      const map = generateMap(s.map);
+      const map = generateMap((data.state as GameState).map);
+      const s = migrateState(map, data.state as GameState);
       this.setMap(map, s.settings.theme);
       this.state = s;
       this.colorblind = !!data.colorblind;
@@ -165,76 +168,98 @@ export class Game {
   private buildHud() {
     this.ui.replaceChildren();
     const e = this.els;
-    e.topbar = h('div', { id: 'topbar', class: 'panel' });
-    e.dock = h('div', { id: 'dock', class: 'panel' });
-    e.sheet = h('div', { id: 'sheet', class: 'panel collapsed' });
-    e.playbar = h('div', { id: 'playbar', class: 'panel hidden' });
+    e.topbar = h('div', { id: 'topbar' });
+    e.dock = h('div', { id: 'dock', class: 'surface' });
+    e.more = h('div', { id: 'more', class: 'surface hidden' });
+    e.unitcard = h('div', { id: 'unitcard', class: 'surface hidden' });
+    e.sheet = h('div', { id: 'sheet', class: 'surface collapsed' });
+    e.playbar = h('div', { id: 'playbar', class: 'surface hidden' });
     e.stamp = h('div', { id: 'stamp', class: 'hidden' });
     e.tally = h('div', { id: 'tally', class: 'hidden' });
     e.moment = h('div', { id: 'moment' });
-    e.toast = h('div', { id: 'toast', class: 'panel', style: 'opacity:0' });
-    e.fracbar = h('div', { id: 'fracbar', class: 'panel hidden' });
-    e.buildmenu = h('div', { id: 'buildmenu', class: 'panel hidden' });
+    e.toast = h('div', { id: 'toast', class: 'surface', style: 'opacity:0' });
+    e.fracbar = h('div', { id: 'fracbar', class: 'surface hidden' });
+    e.buildmenu = h('div', { id: 'buildmenu', class: 'surface hidden' });
     e.overlay = h('div', { id: 'overlay' });
-    e.sheetToggle = h('button', { id: 'sheetToggle', class: 'panel hidden', onclick: () => { this.sheetOpen = true; this.renderSheet(); } }, '◂ Info');
-    this.ui.append(e.stamp, e.tally, e.moment, e.topbar, e.sheet, e.sheetToggle, e.dock, e.playbar, e.fracbar, e.buildmenu, e.toast, e.overlay);
+    this.ui.append(e.stamp, e.tally, e.moment, e.topbar, e.toast, e.unitcard, e.sheet, e.more, e.dock, e.playbar, e.fracbar, e.buildmenu, e.overlay);
 
-    // dock
-    const tools = h('div', { class: 'tools' }, TOOLS.map(([t, label, key]) =>
-      h('button', { class: 'tool', 'data-tool': t, title: `${label} (${key})`, onclick: () => this.setTool(t) }, svg(ICONS[t]), label)));
+    // dock: three primary tools, the rest behind "Lainnya"
+    const tool = (t: Tool, label: string, key: string) =>
+      h('button', { class: 'tool', 'data-tool': t, title: `${label} (${key})`, onclick: () => this.setTool(t) }, svg(ICONS[t]), h('span', null, label));
+    const primary = TOOLS.slice(0, 3).map(([t, label, key]) => tool(t, label, key));
+    e.moreBtn = h('button', { class: 'tool', title: 'Alat lain', onclick: () => { this.moreOpen = !this.moreOpen; this.setTool(this.tool); } },
+      svg(ICONS.more), h('span', null, 'Lainnya'));
+    e.more.append(...TOOLS.slice(3).map(([t, label, key]) => tool(t, label, key)));
     e.dock.append(
-      tools,
+      h('div', { class: 'tools' }, ...primary, e.moreBtn),
       h('div', { class: 'sep' }),
-      h('button', { class: 'tool', title: 'Batal (Ctrl+Z)', onclick: () => this.undo() }, svg(ICONS.undo), 'Batal'),
-      h('button', { class: 'tool hide-sm', title: 'Ulang (Ctrl+Y)', onclick: () => this.redo() }, svg(ICONS.redo), 'Ulang'),
+      h('button', { class: 'tool', title: 'Batal (Ctrl+Z)', onclick: () => this.undo() }, svg(ICONS.undo), h('span', null, 'Batal')),
       h('button', { class: 'done', onclick: () => this.finishPlan() }, 'SELESAI'));
     this.setTool('panah');
 
     // playbar
     const pb = e.playbar;
-    const playBtn = h('button', { class: 'btn', title: 'Jeda (Spasi)', onclick: () => { this.dir.paused = !this.dir.paused; this.updatePlaybar(); } });
-    const speedBtn = h('button', { class: 'btn num', title: 'Kecepatan', onclick: () => { this.dir.speed = this.dir.speed >= 4 ? 1 : this.dir.speed * 2; this.updatePlaybar(); } });
-    const camBtn = h('button', { class: 'btn', title: 'Kamera sutradara', onclick: () => { this.dir.autoCam = !this.dir.autoCam; this.updatePlaybar(); } }, svg(ICONS.cam));
-    const recBtn = h('button', { class: 'btn', title: 'Rekam Resolusi (video 9:16)', onclick: () => this.toggleRecord() }, svg(ICONS.rec));
+    const playBtn = h('button', { class: 'icon-btn', title: 'Jeda (Spasi)', onclick: () => { this.dir.paused = !this.dir.paused; this.updatePlaybar(); } });
+    const speedBtn = h('button', { class: 'icon-btn num', title: 'Kecepatan', onclick: () => { this.dir.speed = this.dir.speed >= 4 ? 1 : this.dir.speed * 2; this.updatePlaybar(); } });
+    const camBtn = h('button', { class: 'icon-btn', title: 'Kamera sutradara', onclick: () => { this.dir.autoCam = !this.dir.autoCam; this.updatePlaybar(); } }, svg(ICONS.cam));
+    const recBtn = h('button', { class: 'icon-btn', title: 'Rekam Resolusi (video 9:16)', onclick: () => this.toggleRecord() }, svg(ICONS.rec));
     pb.append(
-      h('button', { class: 'btn', title: 'Putar ulang', onclick: () => this.dir.restart(performance.now()) }, svg(ICONS.replay)),
+      h('button', { class: 'icon-btn', title: 'Putar ulang', onclick: () => this.dir.restart(performance.now()) }, svg(ICONS.replay)),
       playBtn, speedBtn, camBtn, recBtn,
-      h('button', { class: 'btn', title: 'Lewati', onclick: () => this.dir.skip() }, svg(ICONS.skip)));
+      h('button', { class: 'icon-btn', title: 'Lewati', onclick: () => this.dir.skip() }, svg(ICONS.skip)));
     e.playBtn = playBtn; e.speedBtn = speedBtn; e.camBtn = camBtn; e.recBtn = recBtn;
     if (!Recorder.supported()) recBtn.classList.add('hidden');
   }
 
   private setTool(t: Tool) {
+    const changed = t !== this.tool;
     this.tool = t;
+    const extra = TOOLS.slice(3).some(([x]) => x === t);
+    if (changed && extra) this.moreOpen = false;
     this.els.dock?.querySelectorAll('.tool[data-tool]').forEach((b) => b.classList.toggle('active', (b as HTMLElement).dataset.tool === t));
+    this.els.more?.querySelectorAll('.tool[data-tool]').forEach((b) => b.classList.toggle('active', (b as HTMLElement).dataset.tool === t));
+    if (this.els.moreBtn) {
+      const def = TOOLS.find(([x]) => x === t)!;
+      this.els.moreBtn.classList.toggle('active', extra);
+      this.els.moreBtn.replaceChildren(svg(extra ? ICONS[t] : ICONS.more), h('span', null, extra ? def[1] : 'Lainnya'));
+    }
+    this.els.more?.classList.toggle('hidden', !this.moreOpen || this.phase !== 'plan');
     this.hideFloating();
+    if (!changed) return;
     const hints: Record<Tool, string> = {
-      panah: 'Tarik dari pasukanmu ke target. Lingkari wilayah musuh untuk operasi jepit.',
-      gerak: 'Tarik untuk memindahkan pasukan tanpa menyerang.',
+      panah: 'Pilih divisi, lalu tarik panah ke target. Lingkari wilayahmu untuk memilih banyak divisi.',
+      gerak: 'Tarik untuk memindahkan divisi tanpa menyerang.',
       garis: 'Gores di sepanjang perbatasanmu untuk garis pertahanan.',
       udara: 'Lingkari area untuk misi udara (−40 kas).',
-      bangun: 'Ketuk provinsimu untuk membangun; gores garis untuk jalan/rel.',
+      bangun: 'Ketuk provinsimu untuk membangun atau membentuk divisi; gores garis untuk jalan/rel.',
       hangus: 'Ketuk provinsimu untuk bumi hangus.',
     };
-    if (this.phase === 'plan') this.toast(hints[t], 2200);
+    if (this.phase === 'plan') this.toast(hints[t], 2400);
   }
 
   private updateTopbar() {
     const tb = this.els.topbar;
     if (!tb || this.phase !== 'plan') return;
-    const k = this.state.countries[this.current];
-    const spend = pendingSpend(this.state, this.orders[this.current]);
-    const date = fmtDate(dateOf(this.state));
-    const troops = totalTroops(this.state, this.current);
+    const s = this.state;
+    const k = s.countries[this.current];
+    const spend = pendingSpend(s, this.orders[this.current]);
+    const divs = s.units.filter((u) => u.owner === this.current).length;
+    const inbox = s.proposals.filter((p) => p.to === this.current).length + (k.pendingEvent ? 1 : 0);
+    const stat = (label: string, value: string, warn = false) =>
+      h('div', { class: 'stat' }, h('small', null, label), h('span', { class: warn ? 'warn' : '' }, value));
     tb.replaceChildren(
-      h('div', { class: 'who' }, h('img', { class: 'flag', src: flagDataUrl(k.flag), alt: '' }), h('b', null, k.name)),
-      h('div', { class: 'date hide-sm' }, date),
-      h('div', { class: 'stats' },
-        h('div', { class: 'stat' }, h('small', null, 'Kas'), h('span', { style: k.treasury - spend < 0 ? 'color:#ff6b5e' : '' }, fmtInt(k.treasury - spend))),
-        h('div', { class: 'stat' }, h('small', null, 'Pasukan'), h('span', null, fmtCompact(troops))),
-        h('div', { class: 'stat hide-sm' }, h('small', null, 'Stabilitas'), h('span', null, Math.round(k.stability) + '%')),
+      h('div', { id: 'brief' },
+        h('div', { class: 'date' }, fmtDate(dateOf(s))),
+        h('div', { class: 'sub' }, h('img', { class: 'flag', src: flagDataUrl(k.flag), alt: '' }),
+          h('span', { class: 'nm' }, k.name), h('span', { class: 'dot' }), `MINGGU ${s.turn}`)),
+      h('div', { id: 'stats', class: 'surface' },
+        stat('Kas', fmtInt(k.treasury - spend), k.treasury - spend < 0),
+        stat('Divisi', String(divs)),
+        h('div', { class: 'hide-sm' }, stat('Stabilitas', Math.round(k.stability) + '%', k.stability < 35)),
         this.timerEnd ? h('div', { id: 'timer' }) : null,
-        h('button', { class: 'btn small', title: 'Menu', onclick: () => this.menu() }, svg(ICONS.menu))));
+        h('button', { class: 'icon-btn' + (this.sheetOpen ? ' on' : ''), title: 'Info & diplomasi', onclick: () => { this.sheetOpen = !this.sheetOpen; this.renderSheet(); this.updateTopbar(); } },
+          svg(ICONS.info), inbox ? h('i', { class: 'badge' }, String(inbox)) : null),
+        h('button', { class: 'icon-btn', title: 'Menu', onclick: () => this.menu() }, svg(ICONS.menu))));
     document.documentElement.style.setProperty('--pc', k.color);
   }
 
@@ -280,6 +305,94 @@ export class Game {
     this.els.buildmenu?.classList.add('hidden');
   }
 
+  // =====================================================================
+  // divisions: selection, groups, unit card
+  // =====================================================================
+  private myUnits(): Unit[] {
+    return this.state.units.filter((u) => u.owner === this.current);
+  }
+
+  private setSelection(ids: Iterable<number>) {
+    this.selected = new Set([...ids].filter((id) => unitById(this.state, id)?.owner === this.current));
+    this.selectedOrder = -1;
+    this.hideFloating();
+    this.renderUnitCard();
+  }
+
+  /** Divisions already given a move order this turn. */
+  private orderedUnits(): Map<number, number> {
+    const m = new Map<number, number>();
+    this.myOrders().forEach((o, i) => { if (o.kind === 'serang' || o.kind === 'gerak') for (const id of o.units) m.set(id, i); });
+    return m;
+  }
+
+  private makeGroup() {
+    const us = [...this.selected].map((id) => unitById(this.state, id)).filter((u): u is Unit => !!u);
+    if (us.length < 2) return;
+    const k = this.state.countries[this.current];
+    k.groupSerial = (k.groupSerial ?? 0) + 1;
+    const g = { id: this.state.nextGroupId++, owner: this.current, name: `Korps ${roman(k.groupSerial)}` };
+    this.state.groups.push(g);
+    for (const u of us) u.group = g.id;
+    this.pruneGroups();
+    this.toast(`${g.name} dibentuk: ${us.length} divisi. Ketuk satu divisinya untuk memilih seluruh korps.`, 2600);
+    this.renderUnitCard();
+  }
+
+  private ungroup() {
+    for (const id of this.selected) { const u = unitById(this.state, id); if (u) u.group = 0; }
+    this.pruneGroups();
+    this.renderUnitCard();
+  }
+
+  private pruneGroups() {
+    const used = new Set(this.state.units.map((u) => u.group));
+    this.state.groups = this.state.groups.filter((g) => used.has(g.id));
+  }
+
+  private renderUnitCard() {
+    const card = this.els.unitcard;
+    if (!card) return;
+    const s = this.state;
+    const us = [...this.selected].map((id) => unitById(s, id)).filter((u): u is Unit => !!u)
+      .sort((a, b) => TYPE_ORDER[a.type] - TYPE_ORDER[b.type] || b.str - a.str);
+    if (this.phase !== 'plan' || !us.length) { card.classList.add('hidden'); return; }
+    const k = s.countries[this.current];
+    const ordered = this.orderedUnits();
+    const total = us.reduce((a, u) => a + u.str, 0);
+    const org = us.reduce((a, u) => a + u.org * u.str, 0) / Math.max(1, total);
+    const groups = new Set(us.map((u) => u.group));
+    const oneGroup = groups.size === 1 && us[0].group ? s.groups.find((g) => g.id === us[0].group) : undefined;
+    const sym = (u: Unit, w = 34, hh = 22, ech = 'XX') => h('span', { class: 'sym', html: unitSymbolSvg(u.type, k.color, w, hh, ech) });
+    const bar = (v: number) => h('div', { class: 'orgbar' }, h('i', { style: `width:${Math.round(v * 100)}%;background:${v > 0.6 ? 'var(--ok)' : v > 0.3 ? 'var(--warn)' : 'var(--bad)'}` }));
+    const head = us.length === 1
+      ? h('div', { class: 'uc-head' }, sym(us[0], 44, 28),
+        h('div', { class: 'uc-title' },
+          h('b', null, us[0].name),
+          h('small', null, `${UNIT_INFO[us[0].type].name} · ${provinceName(this.map.params.seed, us[0].prov)}${oneGroup ? ' · ' + oneGroup.name : ''}`)))
+      : h('div', { class: 'uc-head' },
+        h('div', { class: 'uc-count num' }, String(us.length)),
+        h('div', { class: 'uc-title' },
+          h('b', null, oneGroup ? oneGroup.name : `${us.length} divisi dipilih`),
+          h('small', null, UNIT_TYPES.map((t) => [t, us.filter((u) => u.type === t).length] as const).filter(([, n]) => n)
+            .map(([t, n]) => `${n} ${UNIT_INFO[t].short}`).join(' · '))));
+    const stats = h('div', { class: 'uc-stats' },
+      h('div', null, h('small', null, 'Kekuatan'), h('b', { class: 'num' }, fmtCompact(total))),
+      h('div', { class: 'grow' }, h('small', null, `Organisasi ${Math.round(org * 100)}%`), bar(org)),
+      us.some((u) => ordered.has(u.id)) ? h('span', { class: 'chip' }, 'Punya perintah') : null);
+    const chips = us.length > 1 ? h('div', { class: 'uc-chips' }, us.map((u) => h('button', {
+      class: 'uchip', title: `${u.name} — ketuk untuk keluarkan dari pilihan`,
+      onclick: () => { this.selected.delete(u.id); this.renderUnitCard(); },
+    }, sym(u, 22, 14, ''), h('span', { class: 'num' }, fmtCompact(u.str))))) : null;
+    const actions = h('div', { class: 'uc-actions' },
+      us.length > 1 && !oneGroup ? h('button', { class: 'btn small', onclick: () => this.makeGroup() }, svg(ICONS.group), 'Jadikan korps') : null,
+      us.some((u) => u.group) ? h('button', { class: 'btn small ghost', onclick: () => this.ungroup() }, 'Lepas korps') : null,
+      h('div', { class: 'grow muted hint' }, 'Tarik panah dari divisi untuk memberi perintah'),
+      h('button', { class: 'icon-btn', title: 'Batal pilih (Esc)', onclick: () => this.setSelection([]) }, svg(ICONS.close)));
+    card.replaceChildren(head, stats, ...(chips ? [chips] : []), actions);
+    card.classList.remove('hidden');
+  }
+
   private modal(content: HTMLElement[], opts: { onClose?: () => void; dismiss?: boolean } = {}) {
     const bg = h('div', { class: 'modal-bg' });
     const box = h('div', { class: 'panel modal' }, ...content);
@@ -316,6 +429,9 @@ export class Game {
   private nextPlanner() {
     this.selectedProv = -1;
     this.selectedOrder = -1;
+    this.selected = new Set();
+    this.sheetOpen = false;
+    this.els.unitcard?.classList.add('hidden');
     this.hideFloating();
     if (!this.queue.length) { this.resolve(); return; }
     this.current = this.queue.shift()!;
@@ -329,7 +445,8 @@ export class Game {
     this.els.topbar.classList.add('hidden');
     this.els.dock.classList.add('hidden');
     this.els.sheet.classList.add('hidden');
-    this.els.sheetToggle.classList.add('hidden');
+    this.els.more.classList.add('hidden');
+    this.els.unitcard.classList.add('hidden');
     const k = this.state.countries[this.current];
     this.audio.sting('curtain');
     const ring = 2 * Math.PI * 60;
@@ -408,7 +525,7 @@ export class Game {
     } else {
       this.tab = 'negara';
       this.sheetOpen = false;
-      this.toast('Tarik panah dari angka pasukanmu ke wilayah musuh. Tekan SELESAI bila siap.', 4200);
+      this.toast('Ketuk divisimu, lalu tarik panah ke wilayah musuh. Tekan SELESAI bila siap.', 4200);
     }
     this.renderSheet();
   }
@@ -438,12 +555,14 @@ export class Game {
     this.els.topbar.classList.add('hidden');
     this.els.dock.classList.add('hidden');
     this.els.sheet.classList.add('hidden');
-    this.els.sheetToggle.classList.add('hidden');
+    this.els.more.classList.add('hidden');
+    this.els.unitcard.classList.add('hidden');
     this.els.playbar.classList.remove('hidden');
     this.els.stamp.classList.remove('hidden');
     this.els.tally.classList.remove('hidden');
     this.r.fitAll();
-    this.dir.start(s, res, performance.now());
+    this.selected = new Set();
+    this.dir.start(s, res, performance.now(), state);
     this.updatePlaybar();
     this.updateStamp(true);
   }
@@ -528,6 +647,7 @@ export class Game {
     this.revalidate();
     this.updateTopbar();
     this.renderSheet();
+    this.renderUnitCard();
   }
 
   undo() {
@@ -578,8 +698,7 @@ export class Game {
     this.hideFloating();
     let ok = false;
     switch (this.tool) {
-      case 'panah': ok = p >= 0 && (this.own(p) ? this.state.provs[p].troops >= 100 : true); break;
-      case 'gerak': ok = this.own(p) && this.state.provs[p].troops >= 100; break;
+      case 'panah': case 'gerak': ok = p >= 0; break;
       case 'garis': case 'bangun': ok = this.own(p); break;
       case 'udara': ok = p >= 0; break;
       default: ok = false;
@@ -612,19 +731,15 @@ export class Game {
     switch (this.tool) {
       case 'panah':
       case 'gerak': {
-        if (this.tool === 'panah' && rec.shape === 'loop') { this.pincer(rec.pts); return; }
-        if (!this.own(sp)) { this.toast('Mulai panah dari pasukanmu sendiri.'); return; }
+        if (rec.shape === 'loop') {
+          // a loop around your own divisions selects them; around enemy land it plans a pincer
+          const inside = this.myUnits().filter((u) => pointInPoly(this.map.provinces[u.prov], rec.pts));
+          if (inside.length) { this.setSelection(inside.map((u) => u.id)); this.toast(`${inside.length} divisi dipilih.`); return; }
+          if (this.tool === 'panah') this.pincer(rec.pts);
+          return;
+        }
         if (rec.shape === 'tap' || ep < 0 || ep === sp) return;
-        const attack = this.tool === 'panah';
-        const path = findPath(this.map, s, c, sp, ep, { attack: true, stroke: rec.pts })
-          ?? (attack ? null : findPath(this.map, s, c, sp, ep, { attack: false, stroke: rec.pts }));
-        if (!path) { this.toast('Tidak ada rute ke sana.'); return; }
-        const o: Order = { kind: attack ? 'serang' : 'gerak', from: sp, path, frac: this.frac };
-        const i = this.addOrder(o);
-        this.selectOrder(i);
-        this.audio.sting('click');
-        const v = this.validity[i];
-        if (v && !v.valid) this.toast('⚠ ' + v.reason, 2600);
+        this.issueMove(this.tool === 'panah' ? 'serang' : 'gerak', sp, ep, simplify(rec.pts, 3 / this.r.cam.zoom).slice(0, 90));
         break;
       }
       case 'garis': {
@@ -635,7 +750,7 @@ export class Game {
         }
         if (provs.length < 2) { this.toast('Garis pertahanan butuh minimal 2 provinsimu.'); return; }
         this.addOrder({ kind: 'bertahan', provs, stroke: simplify(rec.pts, 4 / this.r.cam.zoom).slice(0, 60) });
-        this.toast(`Garis pertahanan: ${provs.length} provinsi, pasukan diratakan & menggali parit (+25%).`, 2400);
+        this.toast(`Garis pertahanan: ${provs.length} provinsi, divisi diratakan & menggali parit (+25%).`, 2400);
         break;
       }
       case 'udara': {
@@ -657,20 +772,73 @@ export class Game {
     }
   }
 
+  /** Which divisions an arrow starting in province sp commands: the selection if it touches sp, else all there. */
+  private commandedUnits(sp: number): Unit[] {
+    const sel = [...this.selected].map((id) => unitById(this.state, id)).filter((u): u is Unit => !!u);
+    if (sel.length && sel.some((u) => u.prov === sp)) return sel;
+    return this.myUnits().filter((u) => u.prov === sp);
+  }
+
+  /**
+   * Issue attack/move orders for the commanded divisions. Divisions in the start province follow
+   * the drawn stroke; selected divisions elsewhere route to the same target on their own.
+   */
+  private issueMove(kind: 'serang' | 'gerak', sp: number, ep: number, stroke: Pt[]) {
+    const s = this.state, c = this.current;
+    if (!this.own(sp)) { this.toast('Mulai panah dari divisimu sendiri.'); return; }
+    const us = this.commandedUnits(sp);
+    if (!us.length) { this.toast('Tidak ada divisimu di sana.'); return; }
+    const byProv = new Map<number, Unit[]>();
+    for (const u of us) { const l = byProv.get(u.prov) ?? []; l.push(u); byProv.set(u.prov, l); }
+    const ids = new Set(us.map((u) => u.id));
+    this.pushUndo();
+    // a division can only have one move order: take it out of earlier ones
+    const list = this.myOrders().map((o) => (o.kind === 'serang' || o.kind === 'gerak') ? { ...o, units: o.units.filter((id) => !ids.has(id)) } : o)
+      .filter((o) => !((o.kind === 'serang' || o.kind === 'gerak') && o.units.length === 0));
+    this.orders[c] = list;
+    let made = 0, last = -1;
+    byProv.forEach((group, from) => {
+      if (from === ep) return;
+      const own = from === sp;
+      const path = findPath(this.map, s, c, from, ep, { attack: true, stroke: own ? stroke : undefined })
+        ?? (kind === 'gerak' ? findPath(this.map, s, c, from, ep, { attack: false, stroke: own ? stroke : undefined }) : null);
+      if (!path) return;
+      const o: Order = kind === 'serang'
+        ? { kind, from, path, units: group.map((u) => u.id), stroke: own ? stroke : undefined }
+        : { kind, from, path, units: group.map((u) => u.id), stroke: own ? stroke : undefined };
+      this.myOrders().push(o);
+      made++;
+      last = this.myOrders().length - 1;
+    });
+    this.afterOrdersChanged();
+    if (!made) { this.toast('Tidak ada rute ke sana.'); return; }
+    this.audio.sting('click');
+    this.setSelection([]);
+    this.selectOrder(last);
+    const v = this.validity[last];
+    if (v && !v.valid) this.toast('⚠ ' + v.reason, 2600);
+    else this.toast(`${us.length} divisi ${kind === 'serang' ? 'menyerang' : 'bergerak'}${made > 1 ? ` dari ${made} provinsi` : ''}.`);
+  }
+
   private pincer(loop: Pt[]) {
     const s = this.state, c = this.current, P = this.map.provinces;
     const targets = P.filter((p) => pointInPoly(p, loop) && !allied(s, c, s.provs[p.id].ctrl)).map((p) => p.id);
-    if (!targets.length) { this.toast('Lingkari wilayah lawan untuk operasi jepit.'); return; }
-    const used = new Set<number>();
+    if (!targets.length) { this.toast('Lingkari wilayah lawan untuk operasi jepit, atau wilayahmu untuk memilih divisi.'); return; }
+    const used = new Set<number>(this.orderedUnits().keys());
     const made: Order[] = [];
+    const group = Date.now() % 100000;
     for (const t of targets) {
       for (const n of P[t].neighbors) {
-        if (!this.own(n) || used.has(n) || s.provs[n].troops < 1000) continue;
-        used.add(n);
-        made.push({ kind: 'serang', from: n, path: [n, t], frac: 0.5, group: Date.now() % 100000 });
+        if (!this.own(n)) continue;
+        // artillery stays put and supports; one division per province holds the line
+        const here = this.myUnits().filter((u) => u.prov === n && !used.has(u.id) && u.type !== 'art');
+        if (here.length < 2) continue;
+        const send = here.sort((a, b) => b.str - a.str).slice(0, here.length - 1);
+        send.forEach((u) => used.add(u.id));
+        made.push({ kind: 'serang', from: n, path: [n, t], units: send.map((u) => u.id), group });
       }
     }
-    if (!made.length) { this.toast('Tidak ada pasukanmu yang bersebelahan dengan lingkaran.'); return; }
+    if (!made.length) { this.toast('Butuh minimal 2 divisi di provinsi yang bersebelahan dengan lingkaran.'); return; }
     this.pushUndo();
     this.myOrders().push(...made);
     this.afterOrdersChanged();
@@ -681,27 +849,45 @@ export class Game {
     this.selectedOrder = i;
     const o = this.myOrders()[i];
     const fb = this.els.fracbar;
-    if (!o || (o.kind !== 'serang' && o.kind !== 'gerak')) {
-      fb.replaceChildren(h('button', { onclick: () => this.deleteOrder(i), title: 'Hapus' }, svg(ICONS.trash)));
-    } else {
+    if (!o) { fb.classList.add('hidden'); return; }
+    const k = this.state.countries[this.current];
+    const trash = h('button', { class: 'icon-btn danger', onclick: () => this.deleteOrder(i), title: 'Hapus perintah (Delete)' }, svg(ICONS.trash));
+    if (o.kind !== 'serang' && o.kind !== 'gerak') fb.replaceChildren(trash);
+    else {
+      const us = o.units.map((id) => unitById(this.state, id)).filter((u): u is Unit => !!u);
+      const pool = this.myUnits().filter((u) => u.prov === o.from);
       fb.replaceChildren(
-        ...([0.25, 0.5, 1] as Frac[]).map((f) => h('button', {
-          class: o.frac === f ? 'on' : '',
-          onclick: () => { this.pushUndo(); o.frac = f; this.frac = f; this.selectOrder(i); this.afterOrdersChanged(); },
-        }, `${f * 100}%`)),
-        h('button', { onclick: () => this.deleteOrder(i), title: 'Hapus' }, svg(ICONS.trash)));
+        h('div', { class: 'ob-units' }, pool.map((u) => {
+          const on = o.units.includes(u.id);
+          return h('button', {
+            class: 'uchip' + (on ? ' on' : ''), title: `${u.name} — ketuk untuk ${on ? 'keluarkan dari' : 'masukkan ke'} perintah`,
+            onclick: () => {
+              if (on && us.length <= 1) return;
+              this.pushUndo();
+              const units = on ? o.units.filter((x) => x !== u.id) : [...o.units, u.id];
+              this.orders[this.current] = this.myOrders().map((x, j) => {
+                if (j === i) return { ...o, units };
+                if (!on && (x.kind === 'serang' || x.kind === 'gerak') && x.units.includes(u.id)) return { ...x, units: x.units.filter((y) => y !== u.id) };
+                return x;
+              }).filter((x) => !((x.kind === 'serang' || x.kind === 'gerak') && !x.units.length));
+              this.afterOrdersChanged();
+              this.selectOrder(this.myOrders().findIndex((x) => (x.kind === 'serang' || x.kind === 'gerak') && x.from === o.from && x.units.includes(units[0])));
+            },
+          }, h('span', { class: 'sym', html: unitSymbolSvg(u.type, k.color, 22, 14) }), h('span', { class: 'num' }, fmtCompact(u.str)));
+        })),
+        trash);
     }
     const at = this.orderAnchor(o);
     const sp = this.r.worldToScreen(at.x, at.y);
-    fb.style.left = `${Math.max(120, Math.min(this.r.W - 120, sp.x))}px`;
-    fb.style.top = `${Math.max(110, sp.y)}px`;
+    fb.style.left = `${Math.max(140, Math.min(this.r.W - 140, sp.x))}px`;
+    fb.style.top = `${Math.min(this.r.H - 200, Math.max(80, sp.y))}px`;
     fb.classList.remove('hidden');
   }
 
   private orderAnchor(o: Order): Pt {
     const P = this.map.provinces;
     switch (o.kind) {
-      case 'serang': case 'gerak': return pointAlong(this.r.route(o.path), 1);
+      case 'serang': case 'gerak': return pointAlong(this.r.routeInfo(o.path, o.stroke).pts, 1);
       case 'bertahan': return o.stroke?.[Math.floor(o.stroke.length / 2)] ?? P[o.provs[0]];
       case 'udara': return { x: o.x, y: o.y };
       case 'bangun': case 'rekrut': case 'hangus': return P[o.prov];
@@ -715,7 +901,7 @@ export class Game {
     let best = -1, bd = 14 / z;
     list.forEach((o, i) => {
       let d = Infinity;
-      if (o.kind === 'serang' || o.kind === 'gerak') d = distToPolyline(w, this.r.route(o.path));
+      if (o.kind === 'serang' || o.kind === 'gerak') d = distToPolyline(w, this.r.routeInfo(o.path, o.stroke).pts);
       else if (o.kind === 'bertahan' && o.stroke) d = distToPolyline(w, o.stroke);
       else if (o.kind === 'udara') d = Math.abs(Math.hypot(w.x - o.x, w.y - o.y) - o.r);
       if (d < bd) { bd = d; best = i; }
@@ -727,9 +913,7 @@ export class Game {
     if (this.phase !== 'plan') return;
     const w = this.r.screenToWorld(sx, sy);
     this.hideFloating();
-    const hit = this.hitOrder(w);
-    if (hit >= 0 && this.tool !== 'bangun' && this.tool !== 'hangus') { this.selectOrder(hit); return; }
-    this.selectedOrder = -1;
+    if (this.moreOpen) { this.moreOpen = false; this.setTool(this.tool); }
     const p = this.r.provinceAt(w.x, w.y);
     if (this.tool === 'bangun' && this.own(p)) { this.selectedProv = p; this.buildMenu(p, sx, sy); this.renderSheet(); return; }
     if (this.tool === 'hangus' && this.own(p)) {
@@ -738,12 +922,35 @@ export class Game {
       else { this.addOrder({ kind: 'hangus', prov: p }); this.toast('Bumi hangus: musuh melambat, tapi infrastrukturmu rusak.', 2400); }
       return;
     }
-    if (this.tool === 'udara' && p >= 0) {
-      this.addOrder({ kind: 'udara', x: w.x, y: w.y, r: 70 });
+    if (this.tool === 'udara' && p >= 0) { this.addOrder({ kind: 'udara', x: w.x, y: w.y, r: 70 }); return; }
+    // 1) a division symbol
+    const hit = this.r.unitsAt(sx, sy);
+    const mine = hit?.ids.map((id) => unitById(this.state, id)).filter((u): u is Unit => !!u && u.owner === this.current) ?? [];
+    if (mine.length) {
+      const u = mine[0];
+      const add = this.shiftDown;
+      const groupIds = u.group ? this.myUnits().filter((x) => x.group === u.group).map((x) => x.id) : [];
+      let next: number[];
+      if (mine.length > 1) next = mine.map((x) => x.id); // collapsed stack: whole province
+      else if (groupIds.length > 1 && !(this.selected.size === groupIds.length && groupIds.every((id) => this.selected.has(id)))) next = groupIds;
+      else next = [u.id];
+      if (add) next = [...this.selected, ...next];
+      this.setSelection(next);
+      this.selectedProv = u.prov;
+      this.renderSheet();
       return;
     }
+    // 2) an arrow
+    const ho = this.hitOrder(w);
+    if (ho >= 0) { this.setSelection([]); this.selectOrder(ho); return; }
+    // 3) a province: own → select its divisions, other → info
     this.selectedProv = p;
-    if (p >= 0) { this.tab = 'provinsi'; this.sheetOpen = true; }
+    if (p >= 0 && this.own(p) && unitsIn(this.state, p).some((u) => u.owner === this.current)) {
+      this.setSelection(this.myUnits().filter((u) => u.prov === p).map((u) => u.id));
+    } else {
+      this.setSelection([]);
+      if (p >= 0 && this.sheetOpen) this.tab = 'provinsi';
+    }
     this.renderSheet();
   }
 
@@ -757,40 +964,47 @@ export class Game {
     this.tab = 'provinsi';
     this.sheetOpen = true;
     this.renderSheet();
+    this.updateTopbar();
   }
 
   private buildMenu(p: number, sx: number, sy: number) {
     const bm = this.els.buildmenu;
     const s = this.state;
     const k = s.countries[this.current];
-    const avail = k.treasury - pendingSpend(s, this.myOrders());
-    const icons: Record<BuildKind, string> = { pabrik: '🏭', pabrikMil: '⚙️', benteng: '🏰', pelabuhan: '⚓', kota: '🏙️', jalan: '🛤️' };
     const kinds: BuildKind[] = ['pabrik', 'pabrikMil', 'benteng', 'pelabuhan', 'kota'];
-    bm.replaceChildren(...kinds.map((kind) => {
-      const o: Order = { kind: 'bangun', prov: p, what: kind };
-      const v = validateOrder(this.map, s, this.current, o, this.myOrders());
-      const info = BUILD_INFO[kind];
-      return h('button', {
-        disabled: !v.ok, title: v.reason ?? info.desc,
-        onclick: () => { this.addOrder(o); this.hideFloating(); this.toast(`${info.name} diantrekan (${info.turns} giliran).`); },
-      }, h('span', null, icons[kind]), info.name, h('small', null, `${info.cost} · ${info.turns}g`));
-    }), h('button', {
-      disabled: avail < 6 * 10,
-      onclick: () => { this.recruit(p, 10000); this.hideFloating(); },
-    }, h('span', null, '🪖'), 'Rekrut 10rb', h('small', null, `${RULES.recruitCostPer1000 * 10} kas`)));
-    bm.style.left = `${Math.max(150, Math.min(this.r.W - 150, sx))}px`;
-    bm.style.top = `${Math.max(250, sy)}px`;
+    const head = (t: string) => h('div', { class: 'bm-head' }, t);
+    bm.replaceChildren(
+      head(`Bangun · ${provinceName(this.map.params.seed, p)}`),
+      h('div', { class: 'bm-grid' }, kinds.map((kind) => {
+        const o: Order = { kind: 'bangun', prov: p, what: kind };
+        const v = validateOrder(this.map, s, this.current, o, this.myOrders());
+        const info = BUILD_INFO[kind];
+        return h('button', {
+          disabled: !v.ok, title: v.reason ?? info.desc,
+          onclick: () => { this.addOrder(o); this.hideFloating(); this.toast(`${info.name} diantrekan (${info.turns} giliran).`); },
+        }, svg(`<path d="${BUILD_ICON_D[kind]}"/>`), h('span', null, info.name), h('small', null, `${info.cost} · ${info.turns}g`));
+      })),
+      head('Bentuk divisi'),
+      h('div', { class: 'bm-grid units' }, UNIT_TYPES.map((t) => {
+        const o: Order = { kind: 'rekrut', prov: p, type: t };
+        const v = validateOrder(this.map, s, this.current, o, this.myOrders());
+        const info = UNIT_INFO[t];
+        return h('button', {
+          disabled: !v.ok, title: v.reason ?? info.desc,
+          onclick: () => { this.recruit(p, t); this.hideFloating(); },
+        }, h('span', { class: 'sym', html: unitSymbolSvg(t, k.color, 30, 19) }), h('span', null, info.name), h('small', null, `${info.cost} · ${fmtCompact(info.maxStr)}`));
+      })));
+    bm.style.left = `${Math.max(160, Math.min(this.r.W - 160, sx))}px`;
+    bm.style.top = `${Math.max(330, sy)}px`;
     bm.classList.remove('hidden');
   }
 
-  private recruit(p: number, amount: number) {
-    const o: Order = { kind: 'rekrut', prov: p, amount };
+  private recruit(p: number, type: UnitType) {
+    const o: Order = { kind: 'rekrut', prov: p, type };
     const v = validateOrder(this.map, this.state, this.current, o, this.myOrders());
     if (!v.ok) { this.toast('⚠ ' + v.reason); return; }
-    const ex = this.myOrders().find((x) => x.kind === 'rekrut' && x.prov === p) as Extract<Order, { kind: 'rekrut' }> | undefined;
-    if (ex) { this.pushUndo(); ex.amount += amount; this.afterOrdersChanged(); }
-    else this.addOrder(o);
-    this.toast(`Rekrut +${fmtCompact(amount)} (tiba akhir giliran).`);
+    this.addOrder(o);
+    this.toast(`Divisi ${UNIT_INFO[type].name} dibentuk akhir giliran.`);
   }
 
   // =====================================================================
@@ -800,18 +1014,18 @@ export class Game {
     const sh = this.els.sheet;
     if (!sh || this.phase !== 'plan') return;
     sh.classList.toggle('collapsed', !this.sheetOpen);
-    this.els.sheetToggle.classList.toggle('hidden', this.sheetOpen);
+    if (!this.sheetOpen) return;
     const s = this.state;
     const inbox = s.proposals.filter((p) => p.to === this.current).length;
     const k = s.countries[this.current];
     const tabBtn = (t: Tab, label: string, badge = 0) => h('button', {
       class: this.tab === t ? 'active' : '',
-      onclick: () => { this.tab = t; this.sheetOpen = true; this.renderSheet(); },
+      onclick: () => { this.tab = t; this.renderSheet(); },
     }, label, badge ? h('span', { class: 'badge' }, String(badge)) : null);
     const tabs = h('div', { class: 'tabs' },
       tabBtn('provinsi', 'Provinsi'), tabBtn('negara', 'Negara'), tabBtn('diplomasi', 'Diplomasi', inbox),
       tabBtn('laporan', 'Laporan', (k.pendingEvent ? 1 : 0)),
-      h('button', { class: 'grip', title: 'Buka/tutup', onclick: () => { this.sheetOpen = !this.sheetOpen; this.renderSheet(); } }, this.sheetOpen ? '▾' : '▴'));
+      h('button', { class: 'icon-btn', title: 'Tutup', onclick: () => { this.sheetOpen = false; this.renderSheet(); this.updateTopbar(); } }, svg(ICONS.close)));
     const body = h('div', { class: 'body' });
     switch (this.tab) {
       case 'provinsi': this.sheetProvince(body); break;
@@ -861,10 +1075,27 @@ export class Game {
         })() : [])),
       ps.queue.length ? h('div', { class: 'muted' }, 'Antrean: ' + ps.queue.map((q) => `${BUILD_INFO[q.kind].name} (${q.left}g)`).join(', ')) : '',
     );
+    const here = unitsIn(s, p);
+    if (here.length && vis) {
+      const kk = s.countries[here[0].owner];
+      body.append(h('div', { class: 'sec' }, `Divisi (${here.length})`),
+        h('div', { class: 'ulist' }, here.sort((a, b) => TYPE_ORDER[a.type] - TYPE_ORDER[b.type]).map((u) => h('button', {
+          class: 'urow' + (this.selected.has(u.id) ? ' on' : ''),
+          onclick: () => { if (u.owner === this.current) this.setSelection([u.id]); this.renderSheet(); },
+        }, h('span', { class: 'sym', html: unitSymbolSvg(u.type, kk?.color ?? '#888', 30, 19) }),
+          h('span', { class: 'grow' }, h('b', null, u.name), h('small', null, `${UNIT_INFO[u.type].name}${u.group ? ' · ' + (s.groups.find((g) => g.id === u.group)?.name ?? '') : ''}`)),
+          h('span', { class: 'num' }, fmtCompact(u.str)),
+          u.owner === this.current ? h('div', { class: 'orgbar sm' }, h('i', { style: `width:${Math.round(u.org * 100)}%` })) : null))));
+    }
     if (mine && ps.owner === this.current) {
-      body.append(h('div', { class: 'sec' }, 'Rekrut'),
-        h('div', { class: 'row' }, [5000, 10000, 25000, 50000].map((a) =>
-          h('button', { class: 'btn small', onclick: () => this.recruit(p, a) }, `+${fmtCompact(a)} · ${RULES.recruitCostPer1000 * a / 1000}`))),
+      const kk = s.countries[this.current];
+      body.append(h('div', { class: 'sec' }, 'Bentuk divisi (tiba akhir giliran)'),
+        h('div', { class: 'row' }, UNIT_TYPES.map((t) => {
+          const o: Order = { kind: 'rekrut', prov: p, type: t };
+          const v = validateOrder(this.map, s, this.current, o, this.myOrders());
+          return h('button', { class: 'btn small', disabled: !v.ok, title: v.reason ?? UNIT_INFO[t].desc, onclick: () => this.recruit(p, t) },
+            h('span', { class: 'sym', html: unitSymbolSvg(t, kk.color, 22, 14) }), `${UNIT_INFO[t].name} · ${UNIT_INFO[t].cost}`);
+        })),
         h('div', { class: 'sec' }, 'Bangun'),
         h('div', { class: 'row' }, (['pabrik', 'pabrikMil', 'benteng', 'pelabuhan', 'kota'] as BuildKind[]).map((kind) => {
           const o: Order = { kind: 'bangun', prov: p, what: kind };
@@ -905,7 +1136,7 @@ export class Game {
         h('div', null, h('small', null, 'Kas'), h('b', null, fmtInt(k.treasury))),
         h('div', null, h('small', null, 'Pendapatan/gil'), h('b', null, (k.lastIncome >= 0 ? '+' : '') + fmtInt(k.lastIncome))),
         h('div', null, h('small', null, 'PDB'), h('b', null, countryGdp(s, c).toFixed(1))),
-        h('div', null, h('small', null, 'Pasukan'), h('b', null, fmtCompact(troops))),
+        h('div', null, h('small', null, 'Divisi'), h('b', null, `${s.units.filter((u) => u.owner === c).length} · ${fmtCompact(troops)}`)),
         h('div', null, h('small', null, 'Tenaga kerja'), h('b', null, `${Math.round((troops / Math.max(1, cap)) * 100)}%`)),
         h('div', null, h('small', null, 'Stabilitas'), h('b', null, `${Math.round(k.stability)}%`)),
         h('div', null, h('small', null, 'Kelelahan perang'), h('b', null, `${Math.round(k.weariness)}%`)),
@@ -913,7 +1144,7 @@ export class Game {
         h('div', null, h('small', null, 'Reputasi'), h('b', null, String(Math.round(k.reputation))))),
       h('div', { class: 'sec' }, 'Anggaran otomatis (separuh pajak)'),
       slider('mil', 'Militer'), slider('civ', 'Sipil'), slider('res', 'Riset'),
-      h('div', { class: 'muted', style: 'font-size:12px' }, 'Militer = penguatan pasukan otomatis · Sipil = stabilitas & pertumbuhan · Riset = kualitas peralatan. Separuh pajak lainnya masuk kas untuk Bangun/Rekrut.'),
+      h('div', { class: 'muted', style: 'font-size:12px' }, 'Militer = mengisi kembali divisi yang berkurang & membentuk divisi infanteri baru dari cadangan · Sipil = stabilitas & pertumbuhan · Riset = kualitas peralatan. Separuh pajak lainnya masuk kas untuk Bangun/Bentuk divisi.'),
       h('div', { class: 'sec' }, `Perintah giliran ini (${this.myOrders().length})`),
       this.myOrders().length ? h('div', null, this.myOrders().map((o, i) => h('div', { class: 'row', style: 'justify-content:space-between' },
         h('span', { style: this.validity[i]?.valid === false ? 'color:#ff6b5e' : '' }, this.describeOrder(o) + (this.validity[i]?.valid === false ? ` — ${this.validity[i].reason}` : '')),
@@ -925,18 +1156,18 @@ export class Game {
     const n = (p: number) => provinceName(this.map.params.seed, p);
     const s = this.state;
     switch (o.kind) {
-      case 'serang': return `⚔ Serang ${n(o.path[o.path.length - 1])} dari ${n(o.from)} (${o.frac * 100}%)`;
-      case 'gerak': return `➜ Gerak ke ${n(o.path[o.path.length - 1])} (${o.frac * 100}%)`;
-      case 'bertahan': return `🛡 Garis pertahanan ${o.provs.length} provinsi`;
-      case 'udara': return '✈ Misi udara';
-      case 'bangun': return `🏗 ${BUILD_INFO[o.what].name} di ${n(o.prov)}`;
-      case 'rekrut': return `🪖 Rekrut ${fmtCompact(o.amount)} di ${n(o.prov)}`;
-      case 'hangus': return `✖ Bumi hangus ${n(o.prov)}`;
-      case 'deklarasi': return `📜 Deklarasi perang ke ${s.countries[o.target].name}`;
-      case 'usul': return `✉ Usul ${PROPOSAL_NAME[o.what]} ke ${s.countries[o.to].name}`;
-      case 'jawab': return `✉ ${o.accept ? 'Terima' : 'Tolak'} usulan`;
-      case 'mata2': return `🕵 Mata-mata ke ${s.countries[o.target].name}`;
-      case 'event': return '📰 Respons peristiwa';
+      case 'serang': return `Serang ${n(o.path[o.path.length - 1])} dari ${n(o.from)} · ${o.units.length} divisi`;
+      case 'gerak': return `Gerak ke ${n(o.path[o.path.length - 1])} · ${o.units.length} divisi`;
+      case 'bertahan': return `Garis pertahanan ${o.provs.length} provinsi`;
+      case 'udara': return 'Misi udara';
+      case 'bangun': return `${BUILD_INFO[o.what].name} di ${n(o.prov)}`;
+      case 'rekrut': return `Bentuk ${UNIT_INFO[o.type].name} di ${n(o.prov)}`;
+      case 'hangus': return `Bumi hangus ${n(o.prov)}`;
+      case 'deklarasi': return `Deklarasi perang ke ${s.countries[o.target].name}`;
+      case 'usul': return `Usul ${PROPOSAL_NAME[o.what]} ke ${s.countries[o.to].name}`;
+      case 'jawab': return `${o.accept ? 'Terima' : 'Tolak'} usulan`;
+      case 'mata2': return `Mata-mata ke ${s.countries[o.target].name}`;
+      case 'event': return 'Respons peristiwa';
     }
   }
 
@@ -974,22 +1205,22 @@ export class Game {
         return h('button', { class: 'btn small' + (sent ? ' on' : ''), onclick: () => this.propose(k.id, what) }, label);
       };
       const actions: HTMLElement[] = [];
-      if (r.status === 'perang') actions.push(propose('damai', '🕊 Damai'));
+      if (r.status === 'perang') actions.push(propose('damai', 'Usul damai'));
       else {
-        actions.push(h('button', { class: 'btn small danger' + (declared ? ' on' : ''), disabled: r.truce > 0, onclick: () => this.declare(k.id) }, declared ? 'Batal deklarasi' : '⚔ Nyatakan perang'));
+        actions.push(h('button', { class: 'btn small danger' + (declared ? ' on' : ''), disabled: r.truce > 0, onclick: () => this.declare(k.id) }, declared ? 'Batal deklarasi' : 'Nyatakan perang'));
         if (r.status !== 'aliansi') actions.push(propose('aliansi', 'Aliansi'));
         if (r.status === 'damai') actions.push(propose('nap', 'Non-agresi'));
         if (!r.trade) actions.push(propose('dagang', 'Dagang'));
       }
       const spied = my.some((o) => o.kind === 'mata2' && o.target === k.id);
-      actions.push(h('button', { class: 'btn small' + (spied ? ' on' : ''), title: `Intel 1 giliran (−${RULES.spyCost})`, onclick: () => this.spy(k.id) }, '🕵'));
+      actions.push(h('button', { class: 'btn small' + (spied ? ' on' : ''), title: `Intel 1 giliran (−${RULES.spyCost})`, onclick: () => this.spy(k.id) }, 'Intel'));
       body.append(h('div', { class: 'cty' },
         h('img', { class: 'flag', src: flagDataUrl(k.flag), alt: '' }),
         h('div', { class: 'nm' }, k.name, h('div', { class: 'muted', style: 'font-size:11px;font-weight:600' }, k.kind === 'manusia' ? 'Manusia' : k.kind === 'ai' ? `AI · ${k.personality}` : `Negara kecil · ${k.personality}`)),
         status, meter, h('div', { class: 'row' }, actions)));
     }
     const intel = s.intel[c];
-    if (intel && intel.turn === s.turn) body.append(h('div', { class: 'news' }, `🕵 Intel: perintah ${s.countries[intel.target].name} giliran lalu tampil samar di peta, dan kekuatannya terlihat.`));
+    if (intel && intel.turn === s.turn) body.append(h('div', { class: 'news' }, `Intel: perintah ${s.countries[intel.target].name} giliran lalu tampil samar di peta, dan kekuatannya terlihat.`));
   }
 
   private toggleOrder(match: (o: Order) => boolean, make: () => Order) {
@@ -1064,7 +1295,7 @@ export class Game {
       h('h2', null, 'Menu'),
       h('div', { class: 'row' },
         h('button', { class: 'btn', onclick: () => { const t = this.state.settings.theme === 'satelit' ? 'kartun' : 'satelit'; this.state.settings.theme = t; this.toast('Membangun tema…'); setTimeout(() => this.r.setTheme(t), 30); bg.remove(); } }, `Tema: ${this.state.settings.theme === 'satelit' ? 'Satelit' : 'Kartun'}`),
-        h('button', { class: 'btn', onclick: () => { this.audio.setMuted(!this.audio.muted); bg.remove(); } }, this.audio.muted ? '🔇 Suara mati' : '🔊 Suara'),
+        h('button', { class: 'btn', onclick: () => { this.audio.setMuted(!this.audio.muted); bg.remove(); } }, this.audio.muted ? 'Suara: mati' : 'Suara: nyala'),
         h('button', { class: 'btn', onclick: () => { this.colorblind = !this.colorblind; bg.remove(); } }, `Pola buta warna: ${this.colorblind ? 'on' : 'off'}`),
         h('button', { class: 'btn', onclick: () => { document.body.classList.toggle('lefty'); bg.remove(); } }, 'Mode kidal')),
       h('div', { class: 'row' },
@@ -1078,7 +1309,9 @@ export class Game {
     this.modal([
       h('h2', null, 'Cara Main'),
       h('div', { class: 'help' },
-        h('p', null, h('b', null, 'Gambar = perintah. '), 'Tarik panah dari angka pasukanmu ke wilayah lawan. Tebal panah = 25/50/100% pasukan (ketuk panah untuk mengubah, atau scroll saat menggambar).'),
+        h('p', null, h('b', null, 'Divisi. '), 'Pasukanmu terdiri dari divisi: Infanteri (✕, tangguh & murah), Lapis Baja (oval, cepat & kuat di medan terbuka, lemah di gunung/hutan/kota), Artileri (titik, memperkuat serangan ke provinsi di sebelahnya), dan Marinir (✕ + gelombang, tanpa penalti pendaratan).'),
+        h('p', null, h('b', null, 'Memilih. '), 'Ketuk simbol divisi atau provinsimu untuk memilih. Lingkari wilayahmu untuk memilih banyak divisi. Pilih beberapa lalu "Jadikan korps" (atau tombol G) agar bisa dipilih bersama dengan sekali ketuk. Shift + klik menambah pilihan.'),
+        h('p', null, h('b', null, 'Gambar = perintah. '), 'Tarik panah dari divisi terpilih ke target. Divisi berjalan mengikuti goresanmu, dan wilayah meluas di belakang mereka. Ketuk panah untuk mengatur divisi mana yang ikut.'),
         h('p', null, h('b', null, 'Lingkari '), 'wilayah musuh dengan alat Serang untuk operasi jepit otomatis — serangan dari ≥2 arah dapat bonus +20%.'),
         h('p', null, h('b', null, 'Garis '), 'di sepanjang perbatasan meratakan pasukan dan menggali parit (+25% bertahan). ', h('b', null, 'Udara '), 'melingkari area untuk dukungan udara.'),
         h('p', null, h('b', null, 'WEGO: '), 'semua pemain merencanakan diam-diam bergantian, lalu semua perintah dieksekusi bersamaan selama 7 hari sebagai animasi. Dua serangan yang bertemu jadi pertempuran berjalan.'),
@@ -1113,7 +1346,10 @@ export class Game {
     this.toast('Video tersimpan — siap diunggah.');
   }
 
+  private shiftDown = false;
+
   private onKey(e: KeyboardEvent) {
+    this.shiftDown = e.shiftKey;
     if ((e.target as HTMLElement)?.tagName === 'INPUT') return;
     if (this.phase === 'plan') {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); e.shiftKey ? this.redo() : this.undo(); }
@@ -1121,7 +1357,8 @@ export class Game {
       else if ((e.key === 'Delete' || e.key === 'Backspace') && this.selectedOrder >= 0) this.deleteOrder(this.selectedOrder);
       else if (e.key === 'Enter') this.finishPlan();
       else if (!e.ctrlKey && /^[1-6]$/.test(e.key)) this.setTool(TOOLS[Number(e.key) - 1][0]);
-      else if (e.key === 'Escape') { this.selectedOrder = -1; this.selectedProv = -1; this.hideFloating(); this.renderSheet(); }
+      else if (e.key === 'Escape') { this.selectedOrder = -1; this.selectedProv = -1; this.setSelection([]); this.renderSheet(); }
+      else if (e.key.toLowerCase() === 'g' && !e.ctrlKey) { if (this.selected.size > 1) this.makeGroup(); }
     } else if (this.phase === 'resolve') {
       if (e.key === ' ') { e.preventDefault(); this.dir.paused = !this.dir.paused; this.updatePlaybar(); }
     }
@@ -1159,6 +1396,7 @@ export class Game {
       view.troops = f.troops;
       view.ctrl = f.ctrl;
       view.cols = f.cols;
+      view.units = f.units;
       view.annex = f.annex;
       view.flash = f.flash;
       view.spotlight = f.spotlight;
@@ -1171,6 +1409,7 @@ export class Game {
       view = this.baseView(this.state, this.phase === 'plan' ? this.current : -1);
       if (this.phase === 'plan') {
         view.orders = this.validity.map((v, i) => ({ ...v, selected: i === this.selectedOrder }));
+        view.selectedUnits = this.selected;
         view.orderOwner = this.current;
         view.selectedProv = this.selectedProv;
         const intel = this.state.intel[this.current];
@@ -1181,7 +1420,7 @@ export class Game {
             pts: this.draft,
             color: this.tool === 'udara' ? '#9ad7ff' : this.tool === 'bangun' ? '#f0e6c8' : k.color,
             dashed: this.tool === 'gerak',
-            width: this.tool === 'panah' ? (this.frac === 1 ? 10 : this.frac === 0.5 ? 7 : 4.5) : 6,
+            width: this.tool === 'panah' || this.tool === 'gerak' ? 8 : 6,
             odds: this.tool === 'panah' ? this.draftOdds() : undefined,
           };
         }
@@ -1212,10 +1451,12 @@ export class Game {
     const end = d[d.length - 1];
     const to = this.r.provinceAt(end.x, end.y);
     if (!this.own(from) || to < 0 || to === from || allied(this.state, this.current, this.state.provs[to].ctrl)) return undefined;
-    const key = `${from}>${to}@${this.frac}#${this.myOrders().length}`;
+    const units = this.commandedUnits(from).filter((u) => u.prov === from).map((u) => u.id);
+    if (!units.length) return undefined;
+    const key = `${from}>${to}@${units.join('.')}#${this.myOrders().length}`;
     if (this.oddsCache?.key === key) return this.oddsCache.odds;
     const path = findPath(this.map, this.state, this.current, from, to, { attack: true, stroke: d }) ?? [from, to];
-    const odds = attackOdds(this.map, this.state, this.current, { from, path, frac: this.frac }, this.myOrders())?.ratio;
+    const odds = attackOdds(this.map, this.state, this.current, { from, path, units }, this.myOrders())?.ratio;
     this.oddsCache = { key, odds };
     return odds;
   }
@@ -1227,6 +1468,8 @@ export class Game {
       troops: s.provs.map((p) => p.troops),
       ctrl: s.provs.map((p) => p.ctrl),
       orders: [], orderOwner: viewer, intel: null, draft: null, cols: [], annex: [], flash: new Map(),
+      units: s.units.map((u): UnitView => ({ id: u.id, owner: u.owner, type: u.type, prov: u.prov, str: u.str, org: u.org, group: u.group })),
+      selectedUnits: new Set<number>(),
       selectedProv: -1, mode: 'plan', spotlight: null, colorblind: this.colorblind,
     };
   }

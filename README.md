@@ -32,6 +32,13 @@ Butuh Node 20+. Hasil build berupa web statis biasa, sehingga bisa dibungkus Cap
 - **Tirai privasi**: peta di-blur saat perangkat berpindah tangan, *tahan 1 detik* untuk membuka, PIN 4 digit opsional. Panah lawan tidak pernah dirender di layar bersama, dan **kabut perang** menyembunyikan kekuatan di luar jangkauan.
 - Urutan perencanaan diacak tiap giliran. Simpan otomatis di awal giliran, lalu bisa *Lanjutkan* dari lobi.
 
+**Divisi militer**
+- Pasukan terdiri dari divisi yang berdiri di provinsi, ditampilkan dengan simbol gaya NATO berwarna negara: **Infanteri** (✕), **Lapis Baja** (oval; cepat dan kuat di medan terbuka, lemah di gunung/hutan/kota), **Artileri** (titik; +12% serangan per divisi ke provinsi di sebelahnya, +bertahan), **Marinir** (✕ + gelombang; tanpa penalti pendaratan).
+- Setiap divisi punya kekuatan dan **organisasi** (turun saat bertempur, pulih saat istirahat dan tersuplai).
+- Ketuk divisi atau provinsi untuk memilih, lingkari wilayahmu untuk memilih banyak divisi, lalu **Jadikan korps** (G) agar bisa dipilih sekaligus. Kartu unit menampilkan kekuatan, organisasi, dan komposisi.
+- Bentuk divisi baru lewat alat Bangun atau panel provinsi. Anggaran militer mengisi kembali divisi yang berkurang, dan cadangan tenaga kerja membentuk divisi infanteri baru di ibu kota.
+- Saat resolusi, kolom divisi berjalan **mengikuti goresan panahmu**, dan wilayah yang direbut **meluas di belakang kolom**. Garis perbatasan baru berpindah setelah perluasan selesai.
+
 **Gambar = perintah**
 | Alat | Gambar | Efek |
 | --- | --- | --- |

@@ -2,9 +2,9 @@ import { catmullRom, clamp, pointAlong, polyLength, subPath, type Pt } from '../
 import { Rng } from '../core/rng';
 import type { GameMap } from '../map/types';
 import { atWar } from '../sim/rules';
-import type { GameState, Order, Theme } from '../sim/types';
+import type { GameState, Order, Theme, UnitType } from '../sim/types';
+import { BUILD_ICON_D, TYPE_ORDER, drawIconBadge, drawUnitSymbol } from './symbols';
 import { Effects } from './effects';
-import { flagBitmap } from './flags';
 import { buildBase, type BaseLayers } from './terrain';
 
 /** odds: undefined = not an attack, null = target hidden by fog, number = attacker:defender estimate. */
@@ -17,8 +17,16 @@ export interface ColView {
   fighting: boolean;
   kind: 'serang' | 'gerak' | 'mundur';
   alpha: number;
+  types: UnitType[];
 }
-export interface AnnexAnim { prov: number; from: number; to: number; ex: number; ey: number; t0: number; dur: number }
+export interface UnitView { id: number; owner: number; type: UnitType; prov: number; str: number; org: number; group: number }
+/**
+ * A province being taken. k runs 0→1 while the attacker's colour spreads from the entry point
+ * along the column's route (u0 → u), then 1→1.35 for the closing border pulse.
+ */
+export interface AnnexAnim { prov: number; from: number; to: number; ex: number; ey: number; k: number; route?: Pt[]; u0?: number; u?: number }
+/** A route polyline plus the arc fraction (0..1) of every province node on it. */
+export interface RouteInfo { pts: Pt[]; knots: number[] }
 
 export interface View {
   state: GameState;
@@ -31,6 +39,8 @@ export interface View {
   intel: { orders: Order[]; owner: number } | null;
   draft: { pts: Pt[]; color: string; dashed: boolean; width: number; odds?: number | null } | null;
   cols: ColView[];
+  units: UnitView[];
+  selectedUnits: Set<number>;
   annex: AnnexAnim[];
   flash: Map<number, number>;
   selectedProv: number;
@@ -66,6 +76,19 @@ function shade(hex: string, k: number): string {
   return `rgb(${f(r)},${f(g)},${f(b)})`;
 }
 
+function cumulative(pts: Pt[]): number[] {
+  const out = [0];
+  for (let i = 1; i < pts.length; i++) out.push(out[i - 1] + Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y));
+  return out;
+}
+
+/** Arc fraction at the given sample indices of a polyline. */
+function arcKnots(pts: Pt[], idx: number[]): number[] {
+  const cum = cumulative(pts);
+  const total = cum[cum.length - 1] || 1;
+  return idx.map((i) => cum[i] / total);
+}
+
 export class Renderer {
   canvas: HTMLCanvasElement;
   ctx: CanvasRenderingContext2D;
@@ -88,6 +111,8 @@ export class Renderer {
   private frontArcs: number[] = [];
   private labels: { c: number; x: number; y: number; size: number; text: string }[] = [];
   private routeCache = new Map<string, Pt[]>();
+  private infoCache = new Map<string, RouteInfo>();
+  private unitHits: { id: number; prov: number; x: number; y: number; w: number; h: number }[] = [];
 
   constructor(canvas: HTMLCanvasElement, map: GameMap) {
     this.canvas = canvas;
@@ -175,6 +200,60 @@ export class Renderer {
       this.routeCache.set(key, r);
     }
     return r;
+  }
+
+  /**
+   * Route for a column/order. With the player's stroke, the column follows the drawn line:
+   * the stroke is pinned to the source and target province anchors and each province on the
+   * path is mapped to its nearest position along it. Falls back to the province route when
+   * the pathfinder had to leave the drawn line (e.g. around a sea).
+   */
+  routeInfo(path: number[], stroke?: Pt[]): RouteInfo {
+    const key = path.join(',') + (stroke ? '|' + stroke.length + ':' + Math.round(stroke[0].x) + ',' + Math.round(stroke[stroke.length - 1].y) : '');
+    const hit = this.infoCache.get(key);
+    if (hit) return hit;
+    const P = this.map.provinces;
+    const fromCentres = (): RouteInfo => {
+      const pts = this.route(path);
+      return { pts, knots: arcKnots(pts, path.map((_, i) => Math.min(pts.length - 1, i * 10))) };
+    };
+    let info: RouteInfo;
+    if (!stroke || stroke.length < 2 || path.length < 2) info = fromCentres();
+    else {
+      const raw = stroke.map((p) => ({ x: p.x, y: p.y }));
+      raw[0] = { x: P[path[0]].x, y: P[path[0]].y };
+      const end = P[path[path.length - 1]];
+      if (Math.hypot(raw[raw.length - 1].x - end.x, raw[raw.length - 1].y - end.y) > 4) raw.push({ x: end.x, y: end.y });
+      else raw[raw.length - 1] = { x: end.x, y: end.y };
+      const pts = catmullRom(raw, 4);
+      const cum = cumulative(pts);
+      const total = cum[cum.length - 1] || 1;
+      let ok = true;
+      const knots: number[] = [];
+      path.forEach((id, i) => {
+        if (i === 0) { knots.push(0); return; }
+        if (i === path.length - 1) { knots.push(1); return; }
+        let bd = Infinity, bu = 0;
+        for (let j = 0; j < pts.length; j++) {
+          const d = Math.hypot(pts[j].x - P[id].x, pts[j].y - P[id].y);
+          if (d < bd) { bd = d; bu = cum[j] / total; }
+        }
+        if (bd > Math.sqrt(P[id].area) * 0.9 + 12) ok = false;
+        knots.push(Math.max(bu, knots[i - 1] + 0.002));
+      });
+      info = ok && knots.every((k, i) => i === 0 || k > knots[i - 1]) && knots[knots.length - 2] < 1
+        ? { pts, knots } : fromCentres();
+    }
+    if (this.infoCache.size > 1500) this.infoCache.clear();
+    this.infoCache.set(key, info);
+    return info;
+  }
+
+  /** Arc fraction for a column at segment idx with progress prog. */
+  uAt(info: RouteInfo, idx: number, prog: number): number {
+    const a = info.knots[Math.min(idx, info.knots.length - 1)] ?? 1;
+    const b = info.knots[Math.min(idx + 1, info.knots.length - 1)] ?? 1;
+    return clamp(a + (b - a) * clamp(prog, 0, 1), 0, 1);
   }
 
   private dotPattern(color: string, dense = false): CanvasPattern {
@@ -418,7 +497,7 @@ export class Renderer {
     const P = map.provinces;
     const fillA = sat ? 0.4 : 0.3;
     const annexFrom = new Map<number, number>();
-    for (const a of v.annex) if (now < a.t0 + a.dur) annexFrom.set(a.prov, a.from);
+    for (const a of v.annex) if (a.k < 1) annexFrom.set(a.prov, a.from);
     const px = z * dpr;
     if (px <= 1.7) {
       const S = px <= 0.8 ? 0.8 : px <= 1.15 ? 1.15 : 1.7;
@@ -431,31 +510,49 @@ export class Renderer {
       this.drawLayers(v, now, z, annexFrom);
     }
 
-    // ---- annexation wipes (radial flow from the entry point) ----
+    // ---- annexation: the attacker's colour spreads along the column's route ----
     for (const an of v.annex) {
+      if (an.k <= 0 || an.k >= 1) continue;
       const i = an.prov;
       const k = s.countries[an.to];
-      if (!k || now < an.t0 || now > an.t0 + an.dur) continue;
-      const t = (now - an.t0) / an.dur;
+      if (!k) continue;
+      const t = an.k;
+      const e = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
       const bb = P[i].bbox;
-      const maxR = Math.hypot(Math.max(an.ex - bb.x0, bb.x1 - an.ex), Math.max(an.ey - bb.y0, bb.y1 - an.ey));
-      const r = maxR * (1 - Math.pow(1 - t, 2.2));
+      const diag = Math.hypot(bb.x1 - bb.x0, bb.y1 - bb.y0);
       ctx.save();
       ctx.clip(this.provPath[i]);
-      ctx.beginPath();
-      ctx.arc(an.ex, an.ey, r, 0, Math.PI * 2);
-      ctx.fillStyle = hexA(k.color, fillA + 0.15);
-      ctx.fill();
-      ctx.strokeStyle = hexA(sat ? '#ffffff' : k.color, 0.85 * (1 - t));
-      ctx.lineWidth = 6 / z;
-      ctx.stroke();
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      let tongue: Pt[] | null = null;
+      if (an.route && an.u0 !== undefined) {
+        const u1 = Math.max(an.u ?? an.u0, an.u0 + 0.001);
+        tongue = subPath(an.route, an.u0, u1);
+      }
+      const width = 10 / z + diag * 2.3 * e;
+      const paint = (lw: number, style: string | CanvasPattern) => {
+        ctx.strokeStyle = style;
+        ctx.fillStyle = style;
+        if (tongue && tongue.length > 1) {
+          ctx.lineWidth = lw;
+          this.strokePts(tongue);
+        } else {
+          ctx.beginPath();
+          ctx.arc(an.ex, an.ey, lw / 2, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      };
+      // advancing stipple band, bright leading edge, then the solid fill
+      paint(width + 26 / z, this.dotPattern(hexA(k.color, 0.95), true));
+      paint(width + 4 / z, hexA(sat ? '#ffffff' : '#111111', 0.55 * (1 - e * 0.6)));
+      paint(width, hexA(k.color, fillA + 0.12));
       ctx.restore();
     }
     for (const an of v.annex) {
-      const t = (now - an.t0 - an.dur) / 500;
-      if (t < 0 || t > 1) continue;
-      ctx.strokeStyle = sat ? `rgba(255,255,255,${1 - t})` : `rgba(0,0,0,${0.8 * (1 - t)})`;
-      ctx.lineWidth = (3 + 4 * t) / z;
+      const t = (an.k - 1) / 0.35;
+      if (t <= 0 || t > 1) continue;
+      ctx.strokeStyle = sat ? `rgba(255,255,255,${0.9 * (1 - t)})` : `rgba(0,0,0,${0.7 * (1 - t)})`;
+      ctx.lineWidth = (2.5 + 4 * t) / z;
       ctx.stroke(this.provPath[an.prov]);
     }
 
@@ -498,10 +595,7 @@ export class Renderer {
 
     // ---- units (screen space) ----
     ctx.setTransform(dpr, 0, 0, dpr, shake.x * dpr, shake.y * dpr);
-    if (v.mode !== 'idle') {
-      this.drawFrontFlags(v);
-      this.drawCounters(v, now);
-    }
+    if (v.mode !== 'idle') this.drawStacks(v, now);
     this.drawColumns(v, now);
     this.drawCapitals(v);
 
@@ -621,10 +715,10 @@ export class Renderer {
     switch (o.kind) {
       case 'serang':
       case 'gerak': {
-        const w = (o.frac === 1 ? 12 : o.frac === 0.5 ? 8 : 5) * pop;
-        this.drawArrow(this.route(o.path), color, w, { dashed: o.kind === 'gerak', invalid, alpha });
-        const tip = pointAlong(this.route(o.path), 1);
-        if (d.selected) this.label(`${Math.round(o.frac * 100)}%`, tip.x, tip.y - 22 / z, '#fff');
+        const route = this.routeInfo(o.path, o.stroke).pts;
+        const w = Math.min(13, 5 + 2.2 * o.units.length) * pop;
+        this.drawArrow(route, color, w, { dashed: o.kind === 'gerak', invalid, alpha });
+        const tip = pointAlong(route, 1);
         if (o.kind === 'serang' && d.odds !== undefined && d.valid) this.oddsBadge(d.odds, tip.x, tip.y + 20 / z, !!d.selected);
         break;
       }
@@ -670,7 +764,7 @@ export class Renderer {
         break;
       }
       case 'bangun': {
-        const icon = { pabrik: '🏭', pabrikMil: '⚙️', benteng: '🏰', pelabuhan: '⚓', kota: '🏙️', jalan: '🛤️' }[o.what];
+
         if (o.what === 'jalan' && o.path && o.path.length > 1) {
           c.save();
           c.globalAlpha = alpha;
@@ -683,11 +777,23 @@ export class Renderer {
           this.strokePts(this.route(o.path));
           c.restore();
         }
-        this.label(icon, P[o.prov].x + 18 / z, P[o.prov].y - 18 / z, '#fff', 16);
+        {
+          const sp = this.worldToScreen(P[o.prov].x + 22 / z, P[o.prov].y - 22 / z);
+          c.save();
+          c.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+          drawIconBadge(c, BUILD_ICON_D[o.what], sp.x, sp.y, 22, color);
+          c.restore();
+        }
         break;
       }
       case 'rekrut':
-        this.label('+' + fmtCompact(o.amount), P[o.prov].x, P[o.prov].y + 26 / z, '#7CFC8A', 13);
+        {
+          const sp = this.worldToScreen(P[o.prov].x, P[o.prov].y);
+          c.save();
+          c.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+          drawUnitSymbol(c, o.type, color, sp.x + 26, sp.y - 26, 20, 13, { alpha: 0.85, badge: '+' });
+          c.restore();
+        }
         break;
       case 'hangus': {
         const p = P[o.prov];
@@ -707,7 +813,7 @@ export class Renderer {
       }
     }
     if (invalid && d.reason && (o.kind === 'serang' || o.kind === 'gerak')) {
-      const t = pointAlong(this.route(o.path), 0.5);
+      const t = pointAlong(this.routeInfo(o.path, o.stroke).pts, 0.5);
       this.label('⚠ ' + d.reason, t.x, t.y - 14 / z, '#ff6b5e', 12);
     }
   }
@@ -760,104 +866,110 @@ export class Renderer {
     c.restore();
   }
 
-  private drawFrontFlags(v: View) {
-    const z = this.cam.zoom;
-    if (z < 0.42) return;
+  /**
+   * Division stacks per province. Close up every division is shown with its echelon,
+   * organisation bar and group tag; further out a province collapses to one symbol
+   * with a count; far out to a small marker.
+   */
+  private drawStacks(v: View, now: number) {
     const c = this.ctx;
-    const s = v.state;
-    const sat = this.theme === 'satelit';
+    const z = this.cam.zoom;
     const P = this.map.provinces;
-    for (const ai of this.frontArcs) {
-      const arc = this.map.arcs[ai];
-      const L = polyLength(arc.pts) * z;
-      const n = Math.min(6, Math.floor(L / 22));
-      if (n < 1) continue;
-      for (const side of [arc.a, arc.b]) {
-        if (v.visible && !v.visible[side]) continue;
-        const k = s.countries[v.ctrl[side]];
-        if (!k || v.troops[side] < 500) continue;
-        const cnt = Math.min(n, 1 + Math.floor(v.troops[side] / 15000));
-        for (let i = 0; i < cnt; i++) {
-          const p = pointAlong(arc.pts, (i + 0.5) / n + (cnt < n ? (n - cnt) / (2 * n) : 0));
-          const dx = P[side].x - p.x, dy = P[side].y - p.y;
-          const l = Math.hypot(dx, dy) || 1;
-          const off = 9 / z;
-          const sp = this.worldToScreen(p.x + (dx / l) * off, p.y + (dy / l) * off);
-          if (sat) {
-            const fb = flagBitmap(k.flag, 12, 8);
-            c.drawImage(fb, sp.x - 7, sp.y - 5, 14, 10);
-          } else {
-            c.beginPath();
-            c.arc(sp.x, sp.y, 4.2, 0, Math.PI * 2);
-            c.fillStyle = k.color;
-            c.fill();
-            c.strokeStyle = '#111';
-            c.lineWidth = 1.2;
-            c.stroke();
-          }
-        }
-      }
+    const byProv = new Map<number, UnitView[]>();
+    for (const u of v.units) {
+      if (u.prov < 0) continue;
+      if (v.visible && !v.visible[u.prov]) continue;
+      let l = byProv.get(u.prov);
+      if (!l) byProv.set(u.prov, (l = []));
+      l.push(u);
     }
+    this.unitHits = [];
+    const close = z >= 1.35, mid = z >= 0.42;
+    c.textAlign = 'center';
+    byProv.forEach((list, prov) => {
+      const sp = this.worldToScreen(P[prov].x, P[prov].y);
+      if (sp.x < -60 || sp.y < -60 || sp.x > this.W + 60 || sp.y > this.H + 60) return;
+      list.sort((a, b) => TYPE_ORDER[a.type] - TYPE_ORDER[b.type] || b.str - a.str);
+      const k = v.state.countries[list[0].owner];
+      if (!k) return;
+      const total = list.reduce((a, u) => a + u.str, 0);
+      const flash = v.flash.get(prov);
+      const hit = flash !== undefined && now - flash < 450;
+      const own = list[0].owner === v.viewer;
+      if (close) {
+        const n = Math.min(list.length, 3);
+        const w = 24, h = 16, gap = 4;
+        const rowW = n * w + (n - 1) * gap;
+        list.slice(0, n).forEach((u, i) => {
+          const x = sp.x - rowW / 2 + w / 2 + i * (w + gap);
+          const sel = v.selectedUnits.has(u.id);
+          const y = sp.y - (sel ? 3 : 0);
+          const grp = u.group ? v.state.groups.find((g) => g.id === u.group) : undefined;
+          drawUnitSymbol(c, u.type, k.color, x, y, w, h, {
+            echelon: 'XX', selected: sel, badge: own && grp ? grp.name.replace(/^Korps\s+/, '') : undefined,
+            org: own ? u.org : undefined,
+          });
+          this.unitHits.push({ id: u.id, prov, x, y, w: w + 4, h: h + 10 });
+        });
+        if (list.length > n) this.pill(`+${list.length - n}`, sp.x + rowW / 2 + 14, sp.y, 11);
+        this.strength(total, sp.x, sp.y + h / 2 + (own ? 15 : 12), hit);
+      } else if (mid) {
+        // a small deck: the strongest branch on top, the rest peeking out behind it
+        const top = list[0];
+        const sel = list.some((u) => v.selectedUnits.has(u.id));
+        for (let i = Math.min(2, list.length - 1); i >= 1; i--) {
+          drawUnitSymbol(c, list[i].type, k.color, sp.x + i * 3, sp.y - i * 3, 22, 14, { shadow: false, alpha: 0.9 });
+        }
+        drawUnitSymbol(c, top.type, k.color, sp.x, sp.y, 22, 14, {
+          echelon: list.length > 1 ? 'XXX' : 'XX', selected: sel, badge: list.length > 1 ? String(list.length) : undefined,
+        });
+        for (const u of list) this.unitHits.push({ id: u.id, prov, x: sp.x, y: sp.y, w: 30, h: 26 });
+        this.strength(total, sp.x, sp.y + 17, hit, 12);
+      } else {
+        drawUnitSymbol(c, list[0].type, k.color, sp.x, sp.y, 13, 9, { shadow: false, selected: list.some((u) => v.selectedUnits.has(u.id)) });
+      }
+    });
   }
 
-  private drawCounters(v: View, now: number) {
+  /** Strength label under a stack; flashes red when it just took heavy losses. */
+  private strength(n: number, x: number, y: number, hit: boolean, size = 13) {
     const c = this.ctx;
-    const z = this.cam.zoom;
-    const s = v.state;
-    const sat = this.theme === 'satelit';
-    const P = this.map.provinces;
-    const showNums = z >= 0.4;
+    c.font = `800 ${size}px ${COUNTER_FONT}`;
     c.textAlign = 'center';
     c.textBaseline = 'middle';
-    for (let i = 0; i < P.length; i++) {
-      const t = v.troops[i];
-      if (t < 50) continue;
-      const k = s.countries[v.ctrl[i]];
-      if (!k) continue;
-      const known = !v.visible || v.visible[i];
-      if (!known) continue;
-      const sp = this.worldToScreen(P[i].x, P[i].y);
-      if (sp.x < -40 || sp.y < -40 || sp.x > this.W + 40 || sp.y > this.H + 40) continue;
-      const fl = v.flash.get(i);
-      let scale = 1;
-      let red = false;
-      if (fl !== undefined && now - fl < 450) {
-        const a = (now - fl) / 450;
-        scale = 1 + 0.15 * Math.sin(Math.PI * a);
-        red = true;
-      }
-      const big = clamp(Math.log10(Math.max(100, t)) - 1.5, 0.9, 1.9);
-      const size = (11 + 3.2 * big) * scale * clamp(z * 1.1, 0.8, 1.35);
-      if (sat) {
-        const fb = flagBitmap(k.flag, 16, 11);
-        c.drawImage(fb, sp.x - 9, sp.y - size * 0.95 - 6, 18, 12.5);
-      } else {
-        c.beginPath();
-        c.arc(sp.x, sp.y - size * 0.85, 6.5, 0, Math.PI * 2);
-        c.fillStyle = k.color;
-        c.fill();
-        c.strokeStyle = '#111';
-        c.lineWidth = 1.5;
-        c.stroke();
-        const fb = flagBitmap(k.flag, 10, 7);
-        c.drawImage(fb, sp.x - 1, sp.y - size * 0.85 - 13, 11, 8);
-      }
-      if (!showNums) continue;
-      c.font = `800 ${size}px ${COUNTER_FONT}`;
-      c.lineWidth = 3.4;
-      c.strokeStyle = 'rgba(0,0,0,0.9)';
-      const txt = fmtCompact(t);
-      c.strokeText(txt, sp.x, sp.y);
-      c.fillStyle = red ? '#ff5148' : sat ? '#ffffff' : '#ffffff';
-      c.fillText(txt, sp.x, sp.y);
-      const ps = s.provs[i];
-      if (ps.fort > 0 && z > 0.7) {
-        c.font = `700 10px ${COUNTER_FONT}`;
-        c.strokeText('▲'.repeat(ps.fort), sp.x, sp.y + size * 0.75);
-        c.fillStyle = '#ffd34d';
-        c.fillText('▲'.repeat(ps.fort), sp.x, sp.y + size * 0.75);
-      }
+    c.lineWidth = 3;
+    c.strokeStyle = 'rgba(5,8,13,0.9)';
+    const t = fmtCompact(n);
+    c.strokeText(t, x, y);
+    c.fillStyle = hit ? '#ff5a4e' : '#fff';
+    c.fillText(t, x, y);
+  }
+
+  private pill(text: string, x: number, y: number, size: number) {
+    const c = this.ctx;
+    c.font = `800 ${size}px ${COUNTER_FONT}`;
+    const w = c.measureText(text).width + 8;
+    c.beginPath();
+    c.roundRect(x - w / 2, y - size / 2 - 2, w, size + 4, (size + 4) / 2);
+    c.fillStyle = 'rgba(11,17,24,0.92)';
+    c.fill();
+    c.fillStyle = '#fff';
+    c.textAlign = 'center';
+    c.textBaseline = 'middle';
+    c.fillText(text, x, y + 0.5);
+  }
+
+  /** Unit symbols under a screen point (planning hit-test). */
+  unitsAt(sx: number, sy: number): { ids: number[]; prov: number } | null {
+    let best: { ids: number[]; prov: number } | null = null;
+    let bd = Infinity;
+    for (const h of this.unitHits) {
+      if (Math.abs(sx - h.x) > h.w / 2 || Math.abs(sy - h.y) > h.h / 2) continue;
+      const d = Math.hypot(sx - h.x, sy - h.y);
+      if (d < bd - 0.5) { bd = d; best = { ids: [h.id], prov: h.prov }; }
+      else if (Math.abs(d - bd) <= 0.5 && best) best.ids.push(h.id);
     }
+    return best;
   }
 
   private drawCapitals(v: View) {
@@ -867,62 +979,46 @@ export class Renderer {
       if (!k.alive || k.capital < 0) continue;
       const p = P[k.capital];
       const sp = this.worldToScreen(p.x, p.y);
-      const x = sp.x + 15, y = sp.y + 10;
+      const x = sp.x, y = sp.y - (this.cam.zoom >= 0.8 ? 30 : this.cam.zoom >= 0.42 ? 26 : 12);
       c.beginPath();
       for (let i = 0; i < 10; i++) {
         const a = -Math.PI / 2 + (i * Math.PI) / 5;
-        const r = i % 2 ? 3.2 : 7.5;
+        const r = i % 2 ? 2.6 : 6;
         c.lineTo(x + Math.cos(a) * r, y + Math.sin(a) * r);
       }
       c.closePath();
-      c.fillStyle = '#ffd400';
-      c.strokeStyle = '#1a1a1a';
+      c.fillStyle = '#ffd34d';
+      c.strokeStyle = 'rgba(5,8,13,0.9)';
       c.lineWidth = 1.4;
       c.fill();
       c.stroke();
     }
   }
 
+  /** Moving columns: one symbol per division marching along the drawn route. */
   private drawColumns(v: View, now: number) {
     const c = this.ctx;
     const z = this.cam.zoom;
     const s = v.state;
-    const sat = this.theme === 'satelit';
+    const w = z >= 0.6 ? 22 : 16, h = z >= 0.6 ? 14 : 10;
     for (const col of v.cols) {
       const k = s.countries[col.owner];
       if (!k || col.alpha <= 0.01) continue;
       const L = polyLength(col.route);
-      const n = clamp(Math.round(2 + Math.log2(Math.max(1, col.troops / 2500))), 3, 8);
-      const spacing = 13 / z / Math.max(1, L);
+      const types = col.types.length ? col.types.slice().sort((a, b) => TYPE_ORDER[a] - TYPE_ORDER[b]) : ['inf' as UnitType];
+      const spacing = (w + 6) / z / Math.max(1, L);
       c.globalAlpha = col.alpha;
-      for (let i = n - 1; i >= 0; i--) {
+      for (let i = types.length - 1; i >= 0; i--) {
         const u = col.u - i * spacing;
         if (u < 0) continue;
         const p = pointAlong(col.route, u);
         let sp = this.worldToScreen(p.x, p.y);
-        if (col.fighting) sp = { x: sp.x + Math.sin(now / 40 + i * 2) * 2, y: sp.y + Math.cos(now / 33 + i) * 1.5 };
-        if (sat || col.kind === 'gerak') {
-          const fb = flagBitmap(k.flag, 14, 9);
-          c.drawImage(fb, sp.x - 8, sp.y - 6, 16, 11);
-        } else {
-          c.beginPath();
-          c.arc(sp.x, sp.y, 5.5, 0, Math.PI * 2);
-          c.fillStyle = k.color;
-          c.fill();
-          c.strokeStyle = '#111';
-          c.lineWidth = 1.4;
-          c.stroke();
-        }
+        if (col.fighting) sp = { x: sp.x + Math.sin(now / 40 + i * 2) * 1.8, y: sp.y + Math.cos(now / 33 + i) * 1.3 };
+        drawUnitSymbol(c, types[i], k.color, sp.x, sp.y, w, h, { retreat: col.kind === 'mundur', echelon: i === 0 && z >= 0.6 ? 'XX' : undefined });
       }
       const head = pointAlong(col.route, col.u);
       const hs = this.worldToScreen(head.x, head.y);
-      c.font = `800 13px ${COUNTER_FONT}`;
-      c.textAlign = 'center';
-      c.lineWidth = 3;
-      c.strokeStyle = 'rgba(0,0,0,0.9)';
-      c.strokeText(fmtCompact(col.troops), hs.x, hs.y - 14);
-      c.fillStyle = col.kind === 'mundur' ? '#ffb3ad' : '#fff';
-      c.fillText(fmtCompact(col.troops), hs.x, hs.y - 14);
+      this.strength(col.troops, hs.x, hs.y + h / 2 + 10, false, 12);
       c.globalAlpha = 1;
     }
   }

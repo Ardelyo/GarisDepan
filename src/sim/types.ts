@@ -36,9 +36,32 @@ export interface Country {
   exiled: boolean;
   econStreak: number;
   reputation: number; // -100..100, betrayals lower it
+  reserve: number; // trained manpower waiting to form a new division
+  unitSerial: Record<UnitType, number>; // numbering for division names
+  groupSerial: number;
   casualties: number; // cumulative
   lastIncome: number;
   pendingEvent: GameEventInstance | null;
+}
+
+export type UnitType = 'inf' | 'arm' | 'art' | 'mar';
+
+/** A division. It always stands in a province (or moves between them during resolution). */
+export interface Unit {
+  id: number;
+  owner: number;
+  type: UnitType;
+  prov: number;
+  str: number; // soldiers
+  org: number; // organisation 0..1 (combat readiness)
+  group: number; // 0 = no group
+  name: string;
+}
+
+export interface Group {
+  id: number;
+  owner: number;
+  name: string;
 }
 
 export type BuildKind = 'pabrik' | 'pabrikMil' | 'benteng' | 'pelabuhan' | 'kota' | 'jalan';
@@ -51,6 +74,7 @@ export interface BuildJob {
 export interface ProvState {
   owner: number;
   ctrl: number;
+  /** Sum of the strength of units standing here (derived; kept in sync by the sim). */
   troops: number;
   pop: number; // thousands
   fort: number; // 0..3
@@ -83,15 +107,13 @@ export interface Proposal {
   turn: number;
 }
 
-export type Frac = 0.25 | 0.5 | 1;
-
 export type Order =
-  | { kind: 'serang'; from: number; path: number[]; frac: Frac; stroke?: Pt[]; group?: number }
-  | { kind: 'gerak'; from: number; path: number[]; frac: Frac; stroke?: Pt[] }
+  | { kind: 'serang'; from: number; path: number[]; units: number[]; stroke?: Pt[]; group?: number }
+  | { kind: 'gerak'; from: number; path: number[]; units: number[]; stroke?: Pt[] }
   | { kind: 'bertahan'; provs: number[]; stroke?: Pt[] }
   | { kind: 'udara'; x: number; y: number; r: number }
   | { kind: 'bangun'; prov: number; what: BuildKind; path?: number[] }
-  | { kind: 'rekrut'; prov: number; amount: number }
+  | { kind: 'rekrut'; prov: number; type: UnitType }
   | { kind: 'hangus'; prov: number }
   | { kind: 'deklarasi'; target: number }
   | { kind: 'usul'; to: number; what: ProposalKind; pay: number }
@@ -130,12 +152,16 @@ export interface Intel {
 }
 
 export interface GameState {
-  version: 1;
+  version: 2;
   map: MapParams;
   turn: number;
   startDate: string; // ISO date
   countries: Country[];
   provs: ProvState[];
+  units: Unit[];
+  groups: Group[];
+  nextUnitId: number;
+  nextGroupId: number;
   rel: Relation[][];
   proposals: Proposal[];
   nextProposalId: number;
@@ -157,6 +183,8 @@ export interface ColSnap {
   id: number;
   owner: number;
   path: number[];
+  stroke?: Pt[];
+  types: UnitType[];
   amphib: boolean[]; // per segment
   idx: number;
   prog: number;
@@ -168,14 +196,18 @@ export interface ColSnap {
 
 export type SimEvent =
   | { t: 'battle'; prov: number; x: number; y: number; atk: number[]; def: number; size: number; lossA: number; lossD: number }
-  | { t: 'capture'; prov: number; from: number; to: number; ex: number; ey: number }
+  | { t: 'capture'; prov: number; from: number; to: number; ex: number; ey: number; col: number }
   | { t: 'moment'; text: string; country: number; x: number; y: number; kind: 'dikepung' | 'ibukota' | 'gagal' | 'terobosan' | 'perang' | 'damai' }
   | { t: 'air'; owner: number; x: number; y: number; r: number }
   | { t: 'amphib'; owner: number; from: number; to: number };
 
+export interface UnitSnap { id: number; prov: number; str: number }
+
 export interface TickFrame {
   day: number;
   cols: ColSnap[];
+  /** Units standing in provinces this day (units inside columns are omitted). */
+  units: UnitSnap[];
   troops: number[];
   ctrl: number[];
   events: SimEvent[];
