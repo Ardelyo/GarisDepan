@@ -1,0 +1,148 @@
+<h2>Arah visual GARIS DEPAN: mana yang terasa paling benar?</h2>
+<p class="subtitle">Ketiganya menunjukkan layar yang sama di HP: fase perencanaan, satu divisi lapis baja terpilih, panah yang digambar melengkung, dan wilayah yang meluas di belakang unit (arsiran). Pilih satu, atau bilang bagian mana yang mau digabung.</p>
+
+<style>
+  .gd-row { display:flex; gap:18px; flex-wrap:wrap; justify-content:center; }
+  .gd-phone { width:300px; height:560px; border-radius:22px; overflow:hidden; position:relative; box-shadow:0 8px 30px rgba(0,0,0,.35); }
+  .gd-phone svg { position:absolute; inset:0; }
+  .gd-cap { width:300px; }
+  .gd-cap h3 { margin:10px 0 4px; }
+  .gd-cap p { margin:0; font-size:13px; line-height:1.45; }
+  /* A: Ruang Komando */
+  .A { background:#0d1114; font-family: 'Barlow Condensed','Arial Narrow',sans-serif; }
+  .A .top { position:absolute; left:0; right:0; top:0; height:34px; border-bottom:1px solid #2b3238; display:flex; align-items:center; justify-content:space-between; padding:0 12px; color:#c9d1d6; font-size:13px; letter-spacing:.08em; background:#0d1114e6; }
+  .A .top b { color:#f2b134; font-weight:700; }
+  .A .card { position:absolute; left:10px; bottom:70px; width:170px; background:#12181c; border:1px solid #2b3238; border-left:3px solid #f2b134; color:#c9d1d6; padding:8px 10px; font-size:12px; letter-spacing:.04em; }
+  .A .card .t { color:#fff; font-size:15px; font-weight:700; letter-spacing:.06em; }
+  .A .bar { height:3px; background:#2b3238; margin:5px 0; } .A .bar i { display:block; height:100%; background:#f2b134; }
+  .A .dock { position:absolute; left:0; right:0; bottom:0; height:56px; border-top:1px solid #2b3238; background:#0d1114; display:flex; align-items:center; gap:2px; padding:0 8px; }
+  .A .tool { flex:1; text-align:center; color:#7d8a93; font-size:11px; letter-spacing:.1em; }
+  .A .tool.on { color:#f2b134; }
+  .A .go { background:#f2b134; color:#111; font-weight:800; padding:9px 14px; letter-spacing:.12em; font-size:13px; }
+  /* B: Peta Staf */
+  .B { background:#e9e1cf; font-family: Georgia, 'Times New Roman', serif; }
+  .B .top { position:absolute; left:10px; right:10px; top:10px; display:flex; justify-content:space-between; color:#2a2620; font-size:12px; }
+  .B .top .stamp { border:1.5px solid #9b2a1f; color:#9b2a1f; padding:2px 6px; font-family:'Courier New',monospace; font-weight:700; transform:rotate(-2deg); letter-spacing:.08em; }
+  .B .card { position:absolute; left:10px; bottom:72px; width:176px; background:#f6f1e4; border:1px solid #6d6150; box-shadow:2px 2px 0 #6d615055; color:#2a2620; padding:8px 10px; font-size:12px; }
+  .B .card .t { font-family:'Courier New',monospace; font-weight:700; font-size:13px; letter-spacing:.05em; }
+  .B .bar { height:4px; border:1px solid #2a2620; margin:5px 0; } .B .bar i { display:block; height:100%; background:#2a2620; }
+  .B .dock { position:absolute; left:10px; right:10px; bottom:10px; height:50px; background:#2a2620; display:flex; align-items:center; padding:0 6px; gap:2px; border-radius:3px; }
+  .B .tool { flex:1; text-align:center; color:#cfc6b2; font-size:11px; font-family:'Courier New',monospace; }
+  .B .tool.on { color:#fff; text-decoration:underline; text-decoration-color:#c0392b; text-decoration-thickness:2px; }
+  .B .go { background:#c0392b; color:#fff; font-weight:700; padding:8px 12px; font-family:'Courier New',monospace; letter-spacing:.08em; font-size:12px; }
+  /* C: Satelit Sinematik */
+  .C { background:#05080d; font-family: 'Barlow Condensed','Arial Narrow',sans-serif; }
+  .C .top { position:absolute; left:12px; top:10px; color:#fff; }
+  .C .top .d { font-size:22px; font-weight:800; letter-spacing:.02em; text-shadow:0 2px 6px #000; }
+  .C .top .s { font-size:11px; color:#9fb0c2; letter-spacing:.16em; }
+  .C .chip { position:absolute; right:12px; top:14px; color:#fff; font-size:12px; text-align:right; } .C .chip b { font-size:16px; display:block; }
+  .C .card { position:absolute; left:10px; right:10px; bottom:74px; height:58px; background:#0e141c; border-radius:12px; color:#dfe7ef; padding:8px 12px; font-size:12px; display:flex; gap:10px; align-items:center; }
+  .C .card .t { color:#fff; font-size:16px; font-weight:800; }
+  .C .bar { height:4px; background:#1f2a36; border-radius:2px; margin-top:5px; width:120px; } .C .bar i { display:block; height:100%; background:#3fb6ff; border-radius:2px; }
+  .C .dock { position:absolute; left:10px; right:10px; bottom:10px; height:54px; background:#0e141c; border-radius:14px; display:flex; align-items:center; padding:0 6px; gap:2px; }
+  .C .tool { flex:1; text-align:center; color:#7f8fa1; font-size:11px; font-weight:700; }
+  .C .tool.on { color:#fff; }
+  .C .go { background:#2f62e3; color:#fff; font-weight:800; padding:10px 14px; border-radius:10px; font-size:14px; letter-spacing:.06em; }
+</style>
+
+<div class="cards">
+<div class="card" data-choice="A" onclick="toggleSelect(this)" style="padding:14px">
+  <div class="gd-row">
+  <div>
+  <div class="gd-phone A">
+    <svg viewBox="0 0 300 560" width="300" height="560">
+      <defs>
+        <pattern id="gA" width="20" height="20" patternUnits="userSpaceOnUse"><path d="M20 0H0V20" fill="none" stroke="#1a2126" stroke-width="1"/></pattern>
+        <pattern id="hA" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="6" stroke="#4aa3ff" stroke-width="2" opacity=".55"/></pattern>
+      </defs>
+      <rect width="300" height="560" fill="url(#gA)"/>
+      <path d="M0 40 L160 40 C150 120 190 170 150 230 C120 280 170 330 140 400 L120 560 L0 560Z" fill="#4aa3ff" opacity=".10"/>
+      <path d="M160 40 C150 120 190 170 150 230 C120 280 170 330 140 400 L120 560" fill="none" stroke="#4aa3ff" stroke-width="1.5"/>
+      <path d="M300 40 L160 40 C150 120 190 170 150 230 C120 280 170 330 140 400 L120 560 L300 560Z" fill="#e2483d" opacity=".10"/>
+      <path d="M150 230 C175 220 200 235 214 262 C200 290 168 300 146 300 C140 280 160 250 150 230Z" fill="url(#hA)"/>
+      <path d="M150 230 C175 220 200 235 214 262 C200 290 168 300 146 300" fill="none" stroke="#4aa3ff" stroke-width="2" stroke-dasharray="4 3"/>
+      <path d="M96 300 C130 300 150 250 190 245 C215 242 232 262 236 290" fill="none" stroke="#f2b134" stroke-width="3"/>
+      <path d="M236 290 l-9 -8 m9 8 l3 -11" stroke="#f2b134" stroke-width="3" fill="none"/>
+      <g font-family="Barlow Condensed,Arial Narrow" font-size="9" fill="#c9d1d6" text-anchor="middle">
+        <g transform="translate(96,300)"><rect x="-17" y="-11" width="34" height="22" fill="#0d1114" stroke="#f2b134" stroke-width="2"/><ellipse cx="0" cy="0" rx="11" ry="6" fill="none" stroke="#f2b134" stroke-width="1.5"/><text y="-15">XX</text><text y="22">2. LAPIS BAJA</text></g>
+        <g transform="translate(70,200)"><rect x="-15" y="-10" width="30" height="20" fill="#0d1114" stroke="#4aa3ff" stroke-width="1.5"/><path d="M-15 -10L15 10M15 -10L-15 10" stroke="#4aa3ff" stroke-width="1.2"/><text y="-14">XX</text></g>
+        <g transform="translate(60,400)"><rect x="-15" y="-10" width="30" height="20" fill="#0d1114" stroke="#4aa3ff" stroke-width="1.5"/><circle r="3" fill="#4aa3ff"/><text y="-14">XX</text></g>
+        <g transform="translate(225,170)"><rect x="-15" y="-10" width="30" height="20" fill="#0d1114" stroke="#e2483d" stroke-width="1.5"/><path d="M-15 -10L15 10M15 -10L-15 10" stroke="#e2483d" stroke-width="1.2"/></g>
+        <g transform="translate(240,330)"><rect x="-15" y="-10" width="30" height="20" fill="#0d1114" stroke="#e2483d" stroke-width="1.5"/><path d="M-15 -10L15 10M15 -10L-15 10" stroke="#e2483d" stroke-width="1.2"/></g>
+      </g>
+    </svg>
+    <div class="top"><span>MGG 03 · 01 MAR 2027</span><span>KAS <b>300</b> · DIV <b>14</b></span></div>
+    <div class="card"><div class="t">2. DIVISI LAPIS BAJA</div>Kekuatan 11.8rb · Korps I<div class="bar"><i style="width:82%"></i></div>Organisasi 82% · Suplai penuh</div>
+    <div class="dock"><div class="tool on">SERANG</div><div class="tool">GERAK</div><div class="tool">GARIS</div><div class="tool">LAIN</div><div class="go">SELESAI</div></div>
+  </div></div>
+  </div>
+  <div class="card-body"><h3>A · Ruang Komando</h3><p>Layar komando taktis: gelap, garis grid tipis, satu warna aksen kuning, huruf kondensed kapital. Simbol unit NATO garis tipis. Panel berupa strip tipis di tepi layar, jadi peta tetap mendominasi. Kesannya serius dan profesional.</p></div>
+</div>
+
+<div class="card" data-choice="B" onclick="toggleSelect(this)" style="padding:14px">
+  <div class="gd-row"><div>
+  <div class="gd-phone B">
+    <svg viewBox="0 0 300 560" width="300" height="560">
+      <defs>
+        <pattern id="hB" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(-35)"><line x1="0" y1="0" x2="0" y2="7" stroke="#1f4f9a" stroke-width="1.6" opacity=".55"/></pattern>
+        <filter id="rough"><feTurbulence baseFrequency="0.9" numOctaves="1" seed="3"/><feDisplacementMap in="SourceGraphic" scale="2.2"/></filter>
+      </defs>
+      <g stroke="#b9ad93" stroke-width=".7" fill="none" opacity=".8">
+        <path d="M0 120 C60 110 90 140 150 130 S260 100 300 120"/><path d="M0 160 C70 150 100 180 160 170 S250 150 300 165"/><path d="M0 470 C60 460 120 490 180 480 S260 450 300 470"/>
+      </g>
+      <path d="M0 40 L160 40 C150 120 190 170 150 230 C120 280 170 330 140 400 L120 560 L0 560Z" fill="#1f4f9a" opacity=".12"/>
+      <path d="M300 40 L160 40 C150 120 190 170 150 230 C120 280 170 330 140 400 L120 560 L300 560Z" fill="#b0281c" opacity=".10"/>
+      <path d="M160 40 C150 120 190 170 150 230 C120 280 170 330 140 400 L120 560" fill="none" stroke="#2a2620" stroke-width="3" filter="url(#rough)"/>
+      <path d="M150 230 C175 220 200 235 214 262 C200 290 168 300 146 300 C140 280 160 250 150 230Z" fill="url(#hB)"/>
+      <path d="M150 230 C175 220 200 235 214 262 C200 290 168 300 146 300" fill="none" stroke="#1f4f9a" stroke-width="2.4" filter="url(#rough)"/>
+      <path d="M96 300 C130 300 150 250 190 245 C215 242 232 262 236 290" fill="none" stroke="#1f4f9a" stroke-width="7" stroke-linecap="round" opacity=".85" filter="url(#rough)"/>
+      <path d="M222 278 L238 296 L244 272Z" fill="#1f4f9a" filter="url(#rough)"/>
+      <g font-family="Courier New,monospace" font-size="9" fill="#2a2620" text-anchor="middle" font-weight="700">
+        <g transform="translate(96,300)"><rect x="-17" y="-11" width="34" height="22" fill="#cfdcf0" stroke="#1f4f9a" stroke-width="2"/><ellipse rx="11" ry="6" fill="none" stroke="#1f4f9a" stroke-width="1.6"/><text y="-15">XX</text><text y="22">2 LB</text></g>
+        <g transform="translate(70,200)"><rect x="-15" y="-10" width="30" height="20" fill="#cfdcf0" stroke="#1f4f9a" stroke-width="1.6"/><path d="M-15 -10L15 10M15 -10L-15 10" stroke="#1f4f9a" stroke-width="1.3"/><text y="-14">XX</text></g>
+        <g transform="translate(60,400)"><rect x="-15" y="-10" width="30" height="20" fill="#cfdcf0" stroke="#1f4f9a" stroke-width="1.6"/><circle r="3" fill="#1f4f9a"/><text y="-14">XX</text></g>
+        <g transform="translate(225,170)"><path d="M0 -14 L14 0 L0 14 L-14 0Z" fill="#f0c9c4" stroke="#b0281c" stroke-width="1.6"/><path d="M-7 -7L7 7M7 -7L-7 7" stroke="#b0281c" stroke-width="1.3"/></g>
+        <g transform="translate(240,330)"><path d="M0 -14 L14 0 L0 14 L-14 0Z" fill="#f0c9c4" stroke="#b0281c" stroke-width="1.6"/><path d="M-7 -7L7 7M7 -7L-7 7" stroke="#b0281c" stroke-width="1.3"/></g>
+      </g>
+    </svg>
+    <div class="top"><span>Minggu 3 · 01 Mar 2027</span><span class="stamp">RAHASIA</span></div>
+    <div class="card"><div class="t">2ND DIV. LAPIS BAJA</div>11.800 personel · Korps I<div class="bar"><i style="width:82%"></i></div>Organisasi 82% · Suplai penuh</div>
+    <div class="dock"><div class="tool on">Serang</div><div class="tool">Gerak</div><div class="tool">Garis</div><div class="tool">Lain</div><div class="go">SELESAI</div></div>
+  </div></div></div>
+  <div class="card-body"><h3>B · Peta Staf</h3><p>Peta kertas di meja staf: kertas krem, garis kontur, perbatasan bertinta, panah spidol biru/merah seperti di plastik transparan, cap "RAHASIA". Lawan memakai belah ketupat merah (aturan simbol musuh NATO). Paling cocok dengan ide "gambar = perintah" dan paling khas.</p></div>
+</div>
+
+<div class="card" data-choice="C" onclick="toggleSelect(this)" style="padding:14px">
+  <div class="gd-row"><div>
+  <div class="gd-phone C">
+    <svg viewBox="0 0 300 560" width="300" height="560">
+      <defs>
+        <radialGradient id="vC" cx="50%" cy="45%" r="70%"><stop offset="60%" stop-color="#000" stop-opacity="0"/><stop offset="100%" stop-color="#000" stop-opacity=".6"/></radialGradient>
+        <pattern id="hC" width="5" height="5" patternUnits="userSpaceOnUse"><circle cx="2.5" cy="2.5" r="1.1" fill="#3fb6ff" opacity=".8"/></pattern>
+        <filter id="glow"><feGaussianBlur stdDeviation="2.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+      </defs>
+      <rect width="300" height="560" fill="#16222c"/>
+      <path d="M0 40 L160 40 C150 120 190 170 150 230 C120 280 170 330 140 400 L120 560 L0 560Z" fill="#2f62e3" opacity=".32"/>
+      <path d="M300 40 L160 40 C150 120 190 170 150 230 C120 280 170 330 140 400 L120 560 L300 560Z" fill="#e3342f" opacity=".30"/>
+      <path d="M160 40 C150 120 190 170 150 230 C120 280 170 330 140 400 L120 560" fill="none" stroke="#fff" stroke-width="1.6" filter="url(#glow)" opacity=".9"/>
+      <path d="M150 230 C175 220 200 235 214 262 C200 290 168 300 146 300 C140 280 160 250 150 230Z" fill="url(#hC)"/>
+      <path d="M150 230 C175 220 200 235 214 262 C200 290 168 300 146 300" fill="none" stroke="#3fb6ff" stroke-width="2" filter="url(#glow)"/>
+      <path d="M96 300 C130 300 150 250 190 245 C215 242 232 262 236 290" fill="none" stroke="#3fb6ff" stroke-width="6" stroke-linecap="round" opacity=".9"/>
+      <path d="M223 279 L238 297 L245 272Z" fill="#3fb6ff"/>
+      <g font-family="Barlow Condensed,Arial Narrow" font-size="10" fill="#fff" text-anchor="middle" font-weight="800">
+        <g transform="translate(96,300)"><rect x="-18" y="-12" width="36" height="24" rx="3" fill="#2f62e3" stroke="#fff" stroke-width="2"/><ellipse rx="11" ry="6" fill="none" stroke="#fff" stroke-width="1.8"/><text y="26">11,8rb</text></g>
+        <g transform="translate(70,200)"><rect x="-15" y="-10" width="30" height="20" rx="3" fill="#2f62e3" stroke="#fff" stroke-width="1.4"/><path d="M-15 -10L15 10M15 -10L-15 10" stroke="#fff" stroke-width="1.3"/></g>
+        <g transform="translate(60,400)"><rect x="-15" y="-10" width="30" height="20" rx="3" fill="#2f62e3" stroke="#fff" stroke-width="1.4"/><circle r="3" fill="#fff"/></g>
+        <g transform="translate(225,170)"><rect x="-15" y="-10" width="30" height="20" rx="3" fill="#e3342f" stroke="#fff" stroke-width="1.4"/><path d="M-15 -10L15 10M15 -10L-15 10" stroke="#fff" stroke-width="1.3"/></g>
+        <g transform="translate(240,330)"><rect x="-15" y="-10" width="30" height="20" rx="3" fill="#e3342f" stroke="#fff" stroke-width="1.4"/><path d="M-15 -10L15 10M15 -10L-15 10" stroke="#fff" stroke-width="1.3"/></g>
+      </g>
+      <rect width="300" height="560" fill="url(#vC)"/>
+    </svg>
+    <div class="top"><div class="d">01 Mar 2027</div><div class="s">MINGGU 3 · PERENCANAAN</div></div>
+    <div class="chip">Kas<b>300</b></div>
+    <div class="card"><svg width="36" height="24"><rect x="1" y="1" width="34" height="22" rx="3" fill="#2f62e3" stroke="#fff" stroke-width="2"/><ellipse cx="18" cy="12" rx="10" ry="5.5" fill="none" stroke="#fff" stroke-width="1.6"/></svg><div><div class="t">2. Divisi Lapis Baja</div>11,8rb · Korps I · Organisasi 82%<div class="bar"><i style="width:82%"></i></div></div></div>
+    <div class="dock"><div class="tool on">Serang</div><div class="tool">Gerak</div><div class="tool">Garis</div><div class="tool">Lain</div><div class="go">SELESAI</div></div>
+  </div></div></div>
+  <div class="card-body"><h3>C · Satelit Sinematik</h3><p>Tampilan sekarang yang dirapikan: gelap, perbatasan berpendar, warna negara jenuh, unit berupa blok warna solid. Paling dekat dengan gaya video peta perang viral, tapi juga paling mirip dengan tampilan yang sekarang terasa generik.</p></div>
+</div>
+</div>

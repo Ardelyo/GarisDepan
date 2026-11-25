@@ -110,3 +110,17 @@ Semua angka balancing ada di `src/sim/rules.ts` (`RULES`, `BUILD_INFO`). Itu nil
 - Dewan Dunia & kemenangan diplomasi, mode Tim, mode Wasit/cast, tutorial interaktif 5 misi.
 - Armada laut sebagai unit terpisah dan blokade rute dagang. Saat ini invasi amfibi memakai jalur selat + pelabuhan.
 - LAN / online asinkron, pembungkus Capacitor/Tauri, musik orkestra.
+
+## Versi desktop Windows (offline)
+
+Game bisa dimainkan tanpa internet sebagai aplikasi Windows (Electron, semua aset termasuk font dibundel lokal).
+
+```bash
+npm run desktop    # build lalu buka di jendela desktop
+npm run dist:win   # bikin installer + versi portable di release/
+```
+
+- `release/Garis Depan Setup <versi>.exe` — installer, membuat ikon di Desktop dan Start Menu.
+- `release/GarisDepan-Portable-<versi>.exe` — langsung jalan tanpa install.
+
+F11 untuk layar penuh.
