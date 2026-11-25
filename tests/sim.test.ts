@@ -111,3 +111,84 @@ describe('strategy rules (putaran 1)', () => {
     expect(both).toBeGreaterThan(single * 2);
   });
 });
+
+describe('manoeuvre rules (putaran 2)', () => {
+  const map = generateMap({ seed: 5, shape: 'benua', size: 'sedang' });
+  const fresh = () => newGame(map, [{ name: 'A', kind: 'ai', color: 0 }, { name: 'B', kind: 'ai', color: 1 }], 0, { ...settings, fog: false });
+  const deepPath = (s: GameState) => {
+    for (let a = 0; a < s.provs.length; a++) {
+      if (s.provs[a].ctrl !== 0) continue;
+      const b = map.provinces[a].neighbors.find((n) => s.provs[n].ctrl === 1);
+      if (b === undefined) continue;
+      const path = [a, b];
+      let cur = b;
+      for (let k = 0; k < 4; k++) {
+        const nx = map.provinces[cur].neighbors.find((n) => s.provs[n].ctrl === 1 && !path.includes(n));
+        if (nx === undefined) break;
+        path.push(nx);
+        cur = nx;
+      }
+      if (path.length >= 4) return path;
+    }
+    return null;
+  };
+
+  it('an army marches through empty enemy land without stopping at every border', () => {
+    const s = fresh();
+    s.provs.forEach((p) => { if (p.ctrl === 1) p.troops = 0; });
+    const path = deepPath(s)!;
+    s.provs[path[0]].troops = 20000;
+    const r = resolveTurn(map, s, [[{ kind: 'serang', from: path[0], path, frac: 1 }], []]);
+    for (const p of path) expect(r.state.provs[p].ctrl).toBe(0);
+  });
+
+  it('a much stronger column overruns a weak garrison', () => {
+    const s = fresh();
+    const path = deepPath(s)!.slice(0, 2);
+    s.provs[path[0]].troops = 60000;
+    s.provs[path[1]].troops = 1500;
+    const r = resolveTurn(map, s, [[{ kind: 'serang', from: path[0], path, frac: 1 }], []]);
+    const caps = r.res.frames.flatMap((f) => f.events).filter((e) => e.t === 'capture' && e.prov === path[1]);
+    expect(caps.length).toBe(1);
+    expect(r.state.provs[path[1]].ctrl).toBe(0);
+  });
+
+  it('keeps the drawn stroke on the columns and staggers events inside each day', () => {
+    const s = fresh();
+    const path = deepPath(s)!.slice(0, 2);
+    const stroke = path.map((i) => ({ x: map.provinces[i].x + 3, y: map.provinces[i].y - 4 }));
+    const r = resolveTurn(map, s, [[{ kind: 'serang', from: path[0], path, frac: 1, stroke }], []]);
+    expect(r.res.frames[0].cols[0].stroke).toEqual(stroke);
+    for (const f of r.res.frames) for (const e of f.events) if (e.t === 'capture' || e.t === 'battle') {
+      expect(e.at).toBeGreaterThanOrEqual(0);
+      expect(e.at).toBeLessThanOrEqual(1);
+    }
+  });
+});
+
+describe('smart units', () => {
+  it('a marching army leaves a flank guard when it passes an enemy on its side', () => {
+    const map = generateMap({ seed: 5, shape: 'benua', size: 'sedang' });
+    const s = newGame(map, [{ name: 'A', kind: 'ai', color: 0 }, { name: 'B', kind: 'ai', color: 1 }], 0, { ...settings, fog: false });
+    const P = map.provinces;
+    // own province that borders the enemy, reached through another own province
+    for (let cur = 0; cur < P.length; cur++) {
+      if (s.provs[cur].ctrl !== 0) continue;
+      const enemy = P[cur].neighbors.find((n) => s.provs[n].ctrl === 1);
+      const back = P[cur].neighbors.find((n) => s.provs[n].ctrl === 0 && !P[n].neighbors.some((m) => s.provs[m].ctrl === 1));
+      const fwd = P[cur].neighbors.find((n) => s.provs[n].ctrl === 0 && n !== back);
+      if (enemy === undefined || back === undefined || fwd === undefined) continue;
+      s.provs[back].troops = 40000;
+      s.provs[enemy].troops = 30000;
+      const before = s.provs[cur].troops;
+      const r = resolveTurn(map, s, [[{ kind: 'gerak', from: back, path: [back, cur, fwd], frac: 1 }], []]);
+      const det = r.res.frames.flatMap((f) => f.events).find((e) => e.t === 'detach');
+      expect(det).toBeTruthy();
+      if (det && det.t === 'detach') {
+        expect(det.prov).toBe(cur);
+        expect(r.state.provs[cur].troops).toBeGreaterThan(before);
+      }
+      return;
+    }
+  });
+});

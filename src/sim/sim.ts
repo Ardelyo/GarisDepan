@@ -1,4 +1,5 @@
 import { Rng } from '../core/rng';
+import type { Pt } from '../core/geom';
 import type { GameMap } from '../map/types';
 import { TERRAIN_INFO } from '../map/types';
 import {
@@ -25,6 +26,7 @@ interface Col {
   fighting: boolean;
   battleDays: number;
   gone: boolean;
+  stroke?: Pt[];
 }
 
 /**
@@ -211,9 +213,9 @@ export function resolveTurn(map: GameMap, input: GameState, orders: Order[][]): 
   // ---------------- 3. columns ----------------
   const cols: Col[] = [];
   let colId = 1;
-  const mkCol = (owner: number, path: number[], troops: number, kind: Col['kind']): Col => {
+  const mkCol = (owner: number, path: number[], troops: number, kind: Col['kind'], stroke?: Pt[]): Col => {
     const amphib = path.slice(1).map((b, i) => isSeaStep(map, path[i], b));
-    const col: Col = { id: colId++, owner, path, amphib, idx: 0, prog: 0, troops, init: troops, kind, fighting: false, battleDays: 0, gone: false };
+    const col: Col = { id: colId++, owner, path, amphib, idx: 0, prog: 0, troops, init: troops, kind, fighting: false, battleDays: 0, gone: false, stroke };
     cols.push(col);
     if (amphib.some(Boolean)) day0Events.push({ t: 'amphib', owner, from: path[0], to: path[path.length - 1] });
     return col;
@@ -234,7 +236,10 @@ export function resolveTurn(map: GameMap, input: GameState, orders: Order[][]): 
       const amt = Math.round(src.troops * o.frac);
       if (amt < 100) continue;
       src.troops -= amt;
-      mkCol(c, o.path.slice(), amt, o.kind);
+      const stroke = Array.isArray(o.stroke) && o.stroke.length >= 2
+        ? o.stroke.slice(0, 64).filter((q) => Number.isFinite(q?.x) && Number.isFinite(q?.y))
+        : undefined;
+      mkCol(c, o.path.slice(), amt, o.kind, stroke && stroke.length >= 2 ? stroke : undefined);
     }
     // defensive lines: even out troops along the line, then dig in
     for (const o of orders[c] ?? []) {
@@ -266,7 +271,7 @@ export function resolveTurn(map: GameMap, input: GameState, orders: Order[][]): 
     day,
     cols: cols.map((c): ColSnap => ({
       id: c.id, owner: c.owner, path: c.path, amphib: c.amphib, idx: c.idx, prog: c.prog,
-      troops: Math.round(c.troops), fighting: c.fighting, kind: c.kind, gone: c.gone || undefined,
+      troops: Math.round(c.troops), fighting: c.fighting, kind: c.kind, gone: c.gone || undefined, stroke: c.stroke,
     })),
     troops: s.provs.map((p) => Math.round(p.troops)),
     ctrl: s.provs.map((p) => p.ctrl),
@@ -278,6 +283,16 @@ export function resolveTurn(map: GameMap, input: GameState, orders: Order[][]): 
   const airCovers = (owner: number, prov: number) =>
     airZones.some((z) => z.owner === owner && Math.hypot(P[prov].x - z.x, P[prov].y - z.y) < z.r + 20);
   const morale = (c: number) => 0.85 + 0.3 * (s.countries[c].stability / 100) - 0.15 * (s.countries[c].weariness / 100);
+  const defEff = (q: number) => {
+    const pq = s.provs[q], def = pq.ctrl;
+    return Math.max(1, pq.troops) * (s.countries[def]?.quality ?? 1) * (s.countries[def] ? morale(def) : 1) *
+      defenseMultiplier(map, s, q) * (supplied[def] ? supplyCombat(supplied[def][q]) : 1) * (airCovers(def, q) ? RULES.airBonus : 1);
+  };
+  const colEff = (c: Col, q: number, pincer = 1) =>
+    c.troops * s.countries[c.owner].quality * morale(c.owner) * supplyCombat(supplied[c.owner][c.path[c.idx]]) *
+    (c.amphib[c.idx] ? RULES.amphibPenalty : 1) * (airCovers(c.owner, q) ? RULES.airBonus : 1) * pincer;
+  const capturedToday = new Set<number>();
+  const guarded = new Set<string>();
 
   const merge = (col: Col, prov: number) => {
     if (col.gone) return;
@@ -307,24 +322,147 @@ export function resolveTurn(map: GameMap, input: GameState, orders: Order[][]): 
     return true;
   };
 
+  /** Province q changes hands. Defenders fall back (or are trapped), events are logged at time `at`. */
+  const captureProv = (q: number, winner: number, ex: number, ey: number, at: number, how: 'serbu' | 'lindas' | 'serap', atk: Col[], ev: SimEvent[]) => {
+    const pq = s.provs[q];
+    const def = pq.ctrl;
+    const survivors = Math.round(pq.troops * (how === 'serbu' ? 0.8 : 0.9));
+    if (pq.troops > 0 && s.countries[def]) casualties[def] += pq.troops - survivors;
+    const escaped = survivors > 0 && retreatDefenders(q, def, survivors, atk);
+    if (!escaped && survivors > 500) {
+      ev.push({ t: 'moment', text: 'DIKEPUNG!', country: winner, x: P[q].x, y: P[q].y, kind: 'dikepung' });
+      if (s.countries[def]) casualties[def] += survivors;
+    }
+    pq.troops = 0;
+    pq.ctrl = winner;
+    pq.integration = pq.owner === winner ? 1 : 0;
+    if (s.countries[def]) provLost[def]++;
+    capturedToday.add(q);
+    captured.push({ prov: q, from: def, to: winner });
+    ev.push({ t: 'capture', prov: q, from: def, to: winner, ex, ey, at, how });
+    for (const c of atk) if (allied(s, c.owner, winner) && c.path[c.idx + 1] === q) c.fighting = false;
+    const loser = s.countries[def];
+    if (loser && loser.capital === q) {
+      ev.push({ t: 'moment', text: 'IBU KOTA JATUH', country: winner, x: P[q].x, y: P[q].y, kind: 'ibukota' });
+      news.push(`Ibu kota ${loser.name} jatuh ke tangan ${name(winner)}!`);
+      relocateCapital(s, def);
+      loser.stability = Math.max(0, loser.stability - 15);
+      loser.weariness = Math.min(100, loser.weariness + 15);
+      if (loser.capital < 0) {
+        loser.exiled = true;
+        news.push(`${loser.name} kini menjadi pemerintahan pengasingan.`);
+      }
+    }
+  };
+
+  /**
+   * Weak or empty enemy land next to an advancing army falls without a set-piece battle:
+   * provinces beside the axis of advance are swept up, and encircled pockets collapse.
+   */
+  const absorb = (ev: SimEvent[]) => {
+    const near: Set<number>[] = s.countries.map(() => new Set());
+    for (const c of cols) {
+      if (c.gone || c.kind !== 'serang') continue;
+      near[c.owner].add(c.path[c.idx]);
+      if (c.prog >= 0.5 && c.path[c.idx + 1] !== undefined) near[c.owner].add(c.path[c.idx + 1]);
+    }
+    capturedToday.forEach((q) => near[s.provs[q].ctrl]?.add(q));
+    const strength = (x: number, q: number) => {
+      let t = 0;
+      for (const n of P[q].neighbors) if (allied(s, x, s.provs[n].ctrl)) t += s.provs[n].troops;
+      for (const c of cols) if (!c.gone && c.owner === x && P[q].neighbors.includes(c.path[c.idx])) t += c.troops;
+      return t;
+    };
+    const taken = new Array(nC).fill(0);
+    const cand: { q: number; x: number; score: number }[] = [];
+    for (let q = 0; q < P.length; q++) {
+      const d = s.provs[q].ctrl;
+      if (capturedToday.has(q)) continue;
+      for (let x = 0; x < nC; x++) {
+        if (!s.countries[x].alive || !atWar(s, x, d)) continue;
+        const nb = P[q].neighbors;
+        const mine = nb.filter((n) => allied(s, x, s.provs[n].ctrl)).length;
+        if (!mine) continue;
+        const share = mine / nb.length;
+        const active = nb.some((n) => near[x].has(n));
+        const str = strength(x, q);
+        const thr = Math.max(RULES.absorbMin, RULES.absorbShare * str);
+        const pocket = share >= 0.8 && s.provs[q].troops <= str * 0.25;
+        if (pocket || (active && s.provs[q].troops <= thr && (share >= 0.34 || s.provs[q].troops < 200))) {
+          cand.push({ q, x, score: share + (pocket ? 1 : 0) - s.provs[q].troops / Math.max(1, thr) });
+        }
+      }
+    }
+    cand.sort((u, v) => v.score - u.score || u.q - v.q);
+    for (const { q, x } of cand) {
+      if (taken[x] >= RULES.absorbPerDay || capturedToday.has(q) || !atWar(s, x, s.provs[q].ctrl)) continue;
+      const from = P[q].neighbors.filter((n) => allied(s, x, s.provs[n].ctrl)).sort((u, v) => s.provs[v].troops - s.provs[u].troops)[0];
+      if (from === undefined) continue; // the neighbour it would come from changed hands earlier today
+      const ex = (P[from].x + P[q].x) / 2, ey = (P[from].y + P[q].y) / 2;
+      captureProv(q, x, ex, ey, 0.3 + 0.65 * rng.next(), 'serap', [], ev);
+      taken[x]++;
+    }
+  };
+
   // ---------------- 4. day loop ----------------
   for (let day = 1; day <= RULES.daysPerTurn; day++) {
     const ev: SimEvent[] = [];
+    capturedToday.clear();
+    // a0. flank awareness: a marching army that passes an enemy on its side leaves a guard there
+    for (const col of cols) {
+      if (col.gone || col.fighting || col.kind === 'mundur' || col.troops < 6000) continue;
+      const nxt = col.path[col.idx + 1];
+      const cur = col.prog >= 0.5 && nxt !== undefined && s.provs[nxt].ctrl === col.owner ? nxt : col.path[col.idx];
+      if (s.provs[cur].ctrl !== col.owner || guarded.has(col.id + ':' + cur)) continue;
+      let threat = 0, toward = -1, worst = 0;
+      for (const n of P[cur].neighbors) {
+        if (col.path.includes(n) || !atWar(s, col.owner, s.provs[n].ctrl)) continue;
+        let t = s.provs[n].troops;
+        for (const e of cols) if (!e.gone && e.kind !== 'mundur' && e.path[e.idx] === n && e.path[e.idx + 1] === cur) t += e.troops;
+        threat += t;
+        if (t > worst) { worst = t; toward = n; }
+      }
+      // enemy columns already coming straight at this province from anywhere
+      for (const e of cols) if (!e.gone && e.kind !== 'mundur' && atWar(s, col.owner, e.owner) && e.path[e.idx + 1] === cur && !P[cur].neighbors.includes(e.path[e.idx])) threat += e.troops;
+      if (toward < 0 || threat < Math.max(3000, RULES.flankThreat * col.troops)) continue;
+      const amt = Math.round(Math.min(col.troops * RULES.flankShare, threat * 0.6) / 100) * 100;
+      if (amt < 1000) continue;
+      guarded.add(col.id + ':' + cur);
+      col.troops -= amt;
+      col.init = Math.max(col.troops, col.init - amt);
+      s.provs[cur].troops += amt;
+      s.provs[cur].entrenched = true;
+      ev.push({ t: 'detach', owner: col.owner, col: col.id, prov: cur, toward, troops: amt, at: 0.05 + 0.35 * rng.next() });
+    }
+
     // a. movement
     for (const col of cols) {
       if (col.gone || col.fighting) continue;
       const a = col.path[col.idx], b = col.path[col.idx + 1];
       if (b === undefined) { merge(col, a); continue; }
       const tb = TERRAIN_INFO[P[b].terrain];
-      let speed = 0.6 * tb.speed * (1 + 0.08 * s.provs[b].infra);
+      let speed = RULES.marchSpeed * tb.speed * (1 + 0.08 * s.provs[b].infra);
       if (col.amphib[col.idx]) speed *= 0.7;
-      if (col.kind === 'mundur') speed = 0.6;
+      if (col.kind === 'mundur') speed = 0.8;
       if (col.kind === 'gerak' && friendlyTo(s, col.owner, b)) speed *= 1.35;
       if (s.provs[b].scorched > 0 && !friendlyTo(s, col.owner, b)) speed *= 0.6;
       const hostile = !friendlyTo(s, col.owner, b) && col.kind !== 'mundur';
       let np = col.prog + speed;
       if (hostile && col.prog < 0.5 && np >= 0.5) {
         if (col.kind === 'serang' && atWar(s, col.owner, s.provs[b].ctrl)) {
+          // overrun: a much stronger column sweeps through a weak garrison without stopping
+          const at = Math.min(1, Math.max(0, (0.5 - col.prog) / Math.max(0.01, speed)));
+          const de = defEff(b);
+          if (s.provs[b].troops < 60 || colEff(col, b) >= RULES.overrunRatio * de) {
+            const loss = Math.min(col.troops * 0.06, de * RULES.lanchesterK * 2);
+            col.troops -= loss;
+            casualties[col.owner] += loss;
+            const pa = P[a], pb = P[b];
+            if (s.provs[b].troops >= 60) ev.push({ t: 'battle', prov: b, x: (pa.x + pb.x) / 2, y: (pa.y + pb.y) / 2, atk: [col.owner], def: s.provs[b].ctrl, size: col.troops + s.provs[b].troops, lossA: loss, lossD: s.provs[b].troops, at });
+            captureProv(b, col.owner, (pa.x + pb.x) / 2, (pa.y + pb.y) / 2, at, s.provs[b].troops < 60 ? 'lindas' : 'serbu', [col], ev);
+            col.prog = Math.min(0.95, col.prog + speed * 0.8);
+            continue;
+          }
           col.prog = 0.5;
           col.fighting = true;
           col.battleDays = 0;
@@ -365,7 +503,7 @@ export function resolveTurn(map: GameMap, input: GameState, orders: Order[][]): 
         A.troops -= la; B.troops -= lb;
         casualties[A.owner] += la; casualties[B.owner] += lb;
         const mx = (P[a0].x + P[a1].x) / 2, my = (P[a0].y + P[a1].y) / 2;
-        ev.push({ t: 'battle', prov: a1, x: mx, y: my, atk: [A.owner], def: B.owner, size: A.troops + B.troops, lossA: la, lossD: lb });
+        ev.push({ t: 'battle', prov: a1, x: mx, y: my, atk: [A.owner], def: B.owner, size: A.troops + B.troops, lossA: la, lossD: lb, at: 0.5 });
         const loser = ea * (A.troops / (A.troops + la)) >= eb * (B.troops / (B.troops + lb)) ? B : A;
         const winner = loser === A ? B : A;
         loser.kind = 'mundur';
@@ -400,17 +538,10 @@ export function resolveTurn(map: GameMap, input: GameState, orders: Order[][]): 
       for (const c of atk) c.battleDays++;
       const sources = new Set(atk.map((c) => c.path[c.idx]));
       const pincer = sources.size >= 2 ? RULES.pincerBonus : 1;
-      const effOf = (c: Col) =>
-        c.troops * s.countries[c.owner].quality * morale(c.owner) *
-        supplyCombat(supplied[c.owner][c.path[c.idx]]) *
-        (c.amphib[c.idx] ? RULES.amphibPenalty : 1) *
-        (airCovers(c.owner, q) ? RULES.airBonus : 1) * pincer;
       const A = atk.reduce((a, c) => a + c.troops, 0);
-      let Aeff = atk.reduce((a, c) => a + effOf(c), 0);
+      let Aeff = atk.reduce((a, c) => a + colEff(c, q, pincer) * (c.battleDays <= 2 ? RULES.attackInitiative : 1), 0);
       const D = pq.troops;
-      const Deff = Math.max(1, D) * (s.countries[def]?.quality ?? 1) * (s.countries[def] ? morale(def) : 1) *
-        defenseMultiplier(map, s, q) * (supplied[def] ? supplyCombat(supplied[def][q]) : 1) *
-        (airCovers(def, q) ? RULES.airBonus : 1);
+      const Deff = defEff(q) * (!pq.entrenched && pq.fort === 0 ? RULES.unpreparedDefense : 1);
       let lossA = Math.min(A * 0.5, (RULES.lanchesterK * Deff * A) / Math.max(1, Aeff));
       let lossD = Math.min(D, (RULES.lanchesterK * Aeff * Math.max(1, D)) / Deff);
       if (atk.some((c) => airCovers(c.owner, q))) lossD = Math.min(D, lossD * 1.15);
@@ -425,7 +556,8 @@ export function resolveTurn(map: GameMap, input: GameState, orders: Order[][]): 
       const main = atk.reduce((a, b) => (b.troops > a.troops ? b : a));
       const src = P[main.path[main.idx]];
       const bx = (src.x + P[q].x) / 2, by = (src.y + P[q].y) / 2;
-      if (D > 0) ev.push({ t: 'battle', prov: q, x: bx, y: by, atk: [...new Set(atk.map((c) => c.owner))], def, size: A + D, lossA, lossD });
+      const at = 0.15 + 0.6 * rng.next();
+      if (D > 0) ev.push({ t: 'battle', prov: q, x: bx, y: by, atk: [...new Set(atk.map((c) => c.owner))], def, size: A + D, lossA, lossD, at });
 
       const A2 = atk.reduce((a, c) => a + c.troops, 0);
       Aeff = Aeff * (A2 / Math.max(1, A));
@@ -433,36 +565,9 @@ export function resolveTurn(map: GameMap, input: GameState, orders: Order[][]): 
       if (pq.troops < 60 || Aeff / Math.max(1, Deff2) >= RULES.breakRatio) {
         // ---- breakthrough ----
         const winner = main.owner;
-        const survivors = Math.round(pq.troops * 0.8);
-        if (pq.troops > 0) casualties[def] += pq.troops - survivors;
-        const escaped = retreatDefenders(q, def, survivors, atk);
-        if (!escaped && survivors > 500) {
-          ev.push({ t: 'moment', text: 'DIKEPUNG!', country: winner, x: P[q].x, y: P[q].y, kind: 'dikepung' });
-          if (s.countries[def]) casualties[def] += survivors;
-        }
-        pq.troops = 0;
-        const prevCtrl = pq.ctrl;
-        pq.ctrl = winner;
-        pq.integration = pq.owner === winner ? 1 : 0;
-        if (s.countries[prevCtrl]) provLost[prevCtrl]++;
-        captured.push({ prov: q, from: prevCtrl, to: winner });
-        ev.push({ t: 'capture', prov: q, from: prevCtrl, to: winner, ex: bx, ey: by });
-        for (const c of atk) {
-          if (allied(s, c.owner, winner)) c.fighting = false;
-        }
-        // capital fell?
-        const loser = s.countries[prevCtrl];
-        if (loser && loser.capital === q) {
-          ev.push({ t: 'moment', text: 'IBU KOTA JATUH', country: winner, x: P[q].x, y: P[q].y, kind: 'ibukota' });
-          news.push(`Ibu kota ${loser.name} jatuh ke tangan ${name(winner)}!`);
-          relocateCapital(s, prevCtrl);
-          loser.stability = Math.max(0, loser.stability - 15);
-          loser.weariness = Math.min(100, loser.weariness + 15);
-          if (loser.capital < 0) {
-            loser.exiled = true;
-            news.push(`${loser.name} kini menjadi pemerintahan pengasingan.`);
-          }
-        } else if (main.init > 30000 && main.path.length > 2 && main.idx === 0) {
+        const wasCapital = s.countries[def]?.capital === q;
+        captureProv(q, winner, bx, by, Math.min(0.95, at + 0.2), 'serbu', atk, ev);
+        if (!wasCapital && main.init > 30000 && main.path.length > 2 && main.idx === 0) {
           ev.push({ t: 'moment', text: 'TEROBOSAN!', country: winner, x: P[q].x, y: P[q].y, kind: 'terobosan' });
         }
       } else {
@@ -470,7 +575,7 @@ export function resolveTurn(map: GameMap, input: GameState, orders: Order[][]): 
         const ratio = Aeff / Math.max(1, Deff2);
         let failedBig = false;
         for (const c of atk) {
-          if (ratio < RULES.attackerGiveUp || c.troops < 0.45 * c.init || c.battleDays >= 5) {
+          if (ratio < RULES.attackerGiveUp || c.troops < 0.4 * c.init || c.battleDays >= 6) {
             if (c.init > 25000) failedBig = true;
             c.fighting = false;
             c.kind = 'mundur';
@@ -483,6 +588,7 @@ export function resolveTurn(map: GameMap, input: GameState, orders: Order[][]): 
         if (failedBig) ev.push({ t: 'moment', text: 'SERANGAN GAGAL', country: def, x: P[q].x, y: P[q].y, kind: 'gagal' });
       }
     }
+    absorb(ev);
     frames.push(snap(day, ev));
   }
 
@@ -579,7 +685,7 @@ export function resolveTurn(map: GameMap, input: GameState, orders: Order[][]): 
     if (reinforce > 0) {
       // reinforcements only go where there is supply and room to feed them
       const sup = endSupply[c];
-      const room = s.provs.map((p, i) => (p.ctrl === c && sup[i] > SUPPLY_CUT ? Math.max(0, stackCap(map, s, i) - p.troops) : 0));
+      const room = s.provs.map((p, i) => (p.ctrl === c && sup[i] > SUPPLY_CUT ? Math.max(0, stackCap(map, s, i) * RULES.garrisonFill - p.troops) : 0));
       const tot = room.reduce((x, y) => x + y, 0);
       reinforce = Math.min(reinforce, tot);
       if (tot > 0) room.forEach((h, i) => { if (h) s.provs[i].troops += (reinforce * h) / tot; });

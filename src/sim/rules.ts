@@ -8,8 +8,19 @@ import type { BuildKind, GameState, Order, ProposalKind } from './types';
 export const RULES = {
   daysPerTurn: 7,
   lanchesterK: 0.09,
-  breakRatio: 1.7,
-  attackerGiveUp: 0.65,
+  breakRatio: 1.3,
+  attackerGiveUp: 0.55,
+  // ---- manoeuvre: armies roll over weak garrisons and absorb empty land ----
+  attackInitiative: 1.2, // attacker picks the time and place: first two days of a battle
+  unpreparedDefense: 0.92, // garrison without trenches or forts
+  overrunRatio: 4, // effective odds at which a column sweeps through without stopping
+  absorbMin: 1200, // garrisons at or below this fall to an adjacent advancing army
+  absorbShare: 0.12, // …or below this share of the adjacent attacking strength
+  absorbPerDay: 3, // per country, keeps collapses readable
+  marchSpeed: 1.0,
+  flankThreat: 0.25, // enemy strength on a flank (share of the column) that makes it leave a guard
+  flankShare: 0.3, // at most this share of the column stays behind as the guard // provinces per day on open ground
+  garrisonFill: 0.6, // automatic reinforcement fills garrisons only to this share of capacity
   amphibPenalty: 0.6,
   pincerBonus: 1.2,
   airBonus: 1.2,
