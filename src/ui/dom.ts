@@ -42,5 +42,9 @@ export const ICONS = {
   skip: '<path d="M5 4 L15 12 L5 20 Z" fill="currentColor"/><path d="M19 4 V20" stroke-width="3"/>',
   cam: '<rect x="3" y="7" width="13" height="10" rx="2"/><path d="M16 11 L21 8 V16 L16 13"/>',
   rec: '<circle cx="12" cy="12" r="7" fill="currentColor"/>',
+  geser: '<path d="M9 11 V5.5 a1.5 1.5 0 0 1 3 0 V10 M12 10 V4.5 a1.5 1.5 0 0 1 3 0 V10 M15 10 V6.5 a1.5 1.5 0 0 1 3 0 V14 c0 4 -2.5 7 -6.5 7 c-3 0 -4.5 -1.7 -6 -4.5 l-2 -3.6 a1.4 1.4 0 0 1 2.3 -1.6 L9 14 V8.5 a1.5 1.5 0 0 1 0 0"/>',
+  lainnya: '<circle cx="5" cy="12" r="1.8" fill="currentColor"/><circle cx="12" cy="12" r="1.8" fill="currentColor"/><circle cx="19" cy="12" r="1.8" fill="currentColor"/>',
+  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11 V17 M12 7.2 V7.4"/>',
+  tutup: '<path d="M6 6 L18 18 M18 6 L6 18"/>',
   trash: '<path d="M4 7 H20 M9 7 V4 H15 V7 M6 7 L7 21 H17 L18 7"/>',
 };

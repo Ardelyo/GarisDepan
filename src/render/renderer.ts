@@ -48,7 +48,7 @@ export interface View {
   orders: DrawnOrder[];
   orderOwner: number;
   intel: { orders: Order[]; owner: number } | null;
-  draft: { pts: Pt[]; color: string; dashed: boolean; width: number; odds?: number | null } | null;
+  draft: { pts: Pt[]; color: string; dashed: boolean; width: number; odds?: number | null; bad?: boolean } | null;
   cols: ColView[];
   dets?: DetachView[];
   annex: AnnexAnim[];
@@ -637,9 +637,17 @@ export class Renderer {
       ctx.lineWidth = v.draft.width + 3;
       if (v.draft.dashed) ctx.setLineDash([12, 9]);
       this.strokeScreen(v.draft.pts);
-      ctx.strokeStyle = v.draft.color;
+      ctx.strokeStyle = v.draft.bad ? '#ff5a4f' : v.draft.color;
       ctx.lineWidth = v.draft.width;
       this.strokeScreen(v.draft.pts);
+      // start marker: a ring at the army the arrow leaves from
+      const st = this.worldToScreen(v.draft.pts[0].x, v.draft.pts[0].y);
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.arc(st.x, st.y, 11 + 2 * Math.sin(now / 90), 0, Math.PI * 2);
+      ctx.strokeStyle = v.draft.bad ? '#ff5a4f' : '#ffffff';
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
       ctx.restore();
       if (v.draft.odds !== undefined) {
         const end = v.draft.pts[v.draft.pts.length - 1];

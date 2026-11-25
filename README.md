@@ -72,7 +72,7 @@ Goresan dihaluskan (Douglas–Peucker, lalu Catmull–Rom), dikenali sebagai gar
 
 | Aksi | HP | PC |
 | --- | --- | --- |
-| Geser / zoom | dua jari / cubit | klik kanan tahan, WASD / scroll |
+| Geser / zoom | dua jari / cubit, atau alat **Geser** (1 jari) | klik kanan tahan, WASD / scroll, tombol `H` |
 | Gambar | satu jari | klik kiri tahan |
 | Bangun / info | tekan lama | klik |
 | Alat | dock | `1`–`6` |

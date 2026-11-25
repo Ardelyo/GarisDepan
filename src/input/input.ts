@@ -3,7 +3,7 @@ import type { Renderer } from '../render/renderer';
 
 export interface InputHandlers {
   /** Return true to treat this drag as a drawing stroke (else it pans). */
-  strokeStart(sx: number, sy: number): boolean;
+  strokeStart(sx: number, sy: number, touch: boolean): boolean;
   strokeMove(sx: number, sy: number): void;
   strokeEnd(pts: Pt[]): void;
   strokeCancel(): void;
@@ -18,6 +18,9 @@ export interface InputHandlers {
 export class Input {
   private pointers = new Map<number, { x: number; y: number; sx: number; sy: number }>();
   private mode: 'none' | 'pending' | 'draw' | 'pan' | 'pinch' = 'none';
+  private touchLike = false;
+  /** Finger jitter tolerance before a touch becomes a drag. */
+  private slop = 6;
   private stroke: Pt[] = [];
   private lpTimer = 0;
   private downT = 0;
@@ -49,6 +52,8 @@ export class Input {
     this.el.setPointerCapture(e.pointerId);
     const p = this.local(e);
     this.pointers.set(e.pointerId, { x: p.x, y: p.y, sx: p.x, sy: p.y });
+    this.touchLike = e.pointerType !== 'mouse';
+    this.slop = this.touchLike ? 10 : 6;
     if (this.pointers.size === 1) {
       this.downT = performance.now();
       if (e.pointerType === 'mouse' && (e.button === 2 || e.button === 1)) {
@@ -59,10 +64,8 @@ export class Input {
       this.stroke = [this.r.screenToWorld(p.x, p.y)];
       clearTimeout(this.lpTimer);
       this.lpTimer = window.setTimeout(() => {
-        if (this.mode === 'pending') {
-          this.mode = 'none';
-          this.h.longPress(p.x, p.y);
-        }
+        // long-press opens the context menu but never kills the gesture: dragging afterwards still draws / pans
+        if (this.mode === 'pending') this.h.longPress(p.x, p.y);
       }, 520);
     } else if (this.pointers.size === 2) {
       if (this.mode === 'draw') this.h.strokeCancel();
@@ -92,9 +95,9 @@ export class Input {
     q.x = p.x;
     q.y = p.y;
     if (this.mode === 'pending') {
-      if (Math.hypot(p.x - q.sx, p.y - q.sy) > 7) {
+      if (Math.hypot(p.x - q.sx, p.y - q.sy) > this.slop) {
         clearTimeout(this.lpTimer);
-        if (this.h.strokeStart(q.sx, q.sy)) {
+        if (this.h.strokeStart(q.sx, q.sy, this.touchLike)) {
           this.mode = 'draw';
           this.h.strokeMove(p.x, p.y);
           this.stroke.push(this.r.screenToWorld(p.x, p.y));
