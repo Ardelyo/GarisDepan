@@ -12,7 +12,7 @@ Dokumen desain lengkap: [`docs/RENCANA.md`](docs/RENCANA.md).
 
 ## Main online
 
-Setelah di-merge ke `main`, game otomatis dipublikasikan ke GitHub Pages di `https://ardelyo.github.io/GarisDepan/`. Aktifkan sekali di **Settings → Pages → Source: GitHub Actions**.
+Setelah di-merge ke `main`, game otomatis dipublikasikan ke GitHub Pages di `https://ardelyo.github.io/GarisDepan/`. Aktifkan sekali di **Settings → Pages → Source: GitHub Actions**. Bila Source dibiarkan "Deploy from a branch", pilih branch **gh-pages** dan folder **/ (root)**; workflow mengisinya otomatis. Jangan memakai branch `main`, karena itu menyajikan file sumber mentah dan halaman tampil putih.
 
 ## Menjalankan
 
