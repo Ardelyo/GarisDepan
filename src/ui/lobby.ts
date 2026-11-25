@@ -1,7 +1,7 @@
 import type { MapShape, MapSize } from '../map/types';
 import { COLOR_NAMES, PLAYER_COLORS, type PlayerSlot } from '../sim/setup';
 import type { Difficulty, Settings, Tempo, Theme } from '../sim/types';
-import { h } from './dom';
+import { h, iconEl } from './dom';
 
 export interface LobbyConfig {
   shape: MapShape;
@@ -81,7 +81,7 @@ export function buildLobby(root: HTMLElement, cb: LobbyCallbacks): HTMLElement {
 
   const seedIn = h('input', { type: 'text', value: cfg.seedText, maxlength: 24 }) as HTMLInputElement;
   seedIn.oninput = () => { cfg.seedText = seedIn.value.toUpperCase(); save(); preview(); };
-  const dice = h('button', { class: 'btn small', onclick: () => { cfg.seedText = randomSeed(); seedIn.value = cfg.seedText; save(); preview(); } }, '🎲');
+  const dice = h('button', { class: 'btn small', onclick: () => { cfg.seedText = randomSeed(); seedIn.value = cfg.seedText; save(); preview(); } }, iconEl('dadu', 18));
 
   const playersBox = h('div');
   const drawPlayers = () => {
@@ -95,8 +95,8 @@ export function buildLobby(root: HTMLElement, cb: LobbyCallbacks): HTMLElement {
       };
       const name = h('input', { type: 'text', value: p.name, placeholder: p.kind === 'ai' ? 'Nama acak (AI)' : `Pemain ${i + 1}`, maxlength: 22 }) as HTMLInputElement;
       name.oninput = () => { p.name = name.value; save(); };
-      const kind = h('button', { class: 'btn small' + (p.kind === 'manusia' ? ' on' : ''), onclick: () => { p.kind = p.kind === 'manusia' ? 'ai' : 'manusia'; save(); drawPlayers(); } }, p.kind === 'manusia' ? '👤 Manusia' : '🤖 AI');
-      const del = h('button', { class: 'btn small', disabled: cfg.players.length <= 2, onclick: () => { cfg.players.splice(i, 1); save(); drawPlayers(); preview(); } }, '✕');
+      const kind = h('button', { class: 'btn small' + (p.kind === 'manusia' ? ' on' : ''), onclick: () => { p.kind = p.kind === 'manusia' ? 'ai' : 'manusia'; save(); drawPlayers(); } }, iconEl(p.kind === 'manusia' ? 'manusia' : 'ai', 16), p.kind === 'manusia' ? 'Manusia' : 'AI');
+      const del = h('button', { class: 'btn small', disabled: cfg.players.length <= 2, onclick: () => { cfg.players.splice(i, 1); save(); drawPlayers(); preview(); } }, iconEl('tutup', 16));
       return h('div', { class: 'prow' }, sw, name, kind, del);
     }));
     if (cfg.players.length < 8) {
@@ -131,7 +131,7 @@ export function buildLobby(root: HTMLElement, cb: LobbyCallbacks): HTMLElement {
       h('div', { style: 'height:8px' }),
       seg<MapSize>([['kecil', 'Kecil ±55'], ['sedang', 'Sedang ±100'], ['besar', 'Besar ±170']], () => cfg.size, (v) => (cfg.size = v), true),
       field('Seed peta', h('div', { class: 'row' }, seedIn, dice), 'Bagikan seed agar grup main peta yang sama'),
-      field('Tema visual', seg<Theme>([['satelit', '🛰 Satelit'], ['kartun', '🖍 Kartun']], () => cfg.theme, (v) => { cfg.theme = v; cfg.settings.theme = v; }, true))),
+      field('Tema visual', seg<Theme>([['satelit', 'Satelit'], ['kartun', 'Kartun']], () => cfg.theme, (v) => { cfg.theme = v; cfg.settings.theme = v; }, true))),
     h('div', { class: 'panel lob' }, h('h3', null, 'Negara (2–8)'), playersBox, field('Negara kecil netral', minors)),
     h('div', { class: 'panel lob' },
       h('h3', null, 'Aturan'),

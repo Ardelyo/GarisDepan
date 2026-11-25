@@ -6,10 +6,12 @@ import type { GameState, Order, Theme } from '../sim/types';
 import { Effects } from './effects';
 import { flagBitmap } from './flags';
 import { buildBase, type BaseLayers } from './terrain';
+import { ICONS, iconUrl } from '../ui/dom';
 
 /** odds: undefined = not an attack, null = target hidden by fog, number = attacker:defender estimate. */
 export interface DrawnOrder { order: Order; valid: boolean; reason?: string; selected?: boolean; odds?: number | null }
 export interface ColView {
+  id: number;
   owner: number;
   route: Pt[];
   u: number;
@@ -48,7 +50,7 @@ export interface View {
   orders: DrawnOrder[];
   orderOwner: number;
   intel: { orders: Order[]; owner: number } | null;
-  draft: { pts: Pt[]; color: string; dashed: boolean; width: number; odds?: number | null } | null;
+  draft: { pts: Pt[]; color: string; dashed: boolean; width: number; odds?: number | null; bad?: boolean } | null;
   cols: ColView[];
   dets?: DetachView[];
   annex: AnnexAnim[];
@@ -58,6 +60,8 @@ export interface View {
   spotlight: { x: number; y: number; t0: number } | null;
   colorblind: boolean;
 }
+
+const baseCache = new Map<string, BaseLayers>();
 
 export interface Camera { x: number; y: number; zoom: number }
 
@@ -144,14 +148,91 @@ export class Renderer {
     this.cam = { x: map.w / 2, y: map.h / 2, zoom: 0.5 };
   }
 
+  private detailPattern = new Map<HTMLCanvasElement, CanvasPattern>();
+
+  /**
+   * Screen-space soft-light detail: a tiny tile that scales only gently with zoom, so
+   * terrain keeps fine texture (and never turns into big blurry pixels) at any zoom.
+   */
+  private drawDetail(base: BaseLayers, z: number, dpr: number, tx: number, ty: number, sat: boolean) {
+    const ctx = this.ctx;
+    let pat = this.detailPattern.get(base.detail);
+    if (!pat) { pat = ctx.createPattern(base.detail, 'repeat')!; this.detailPattern.set(base.detail, pat); }
+    const sc = (0.45 + 0.35 * Math.min(z, 3)) / 2; // tile px per device px, tracks zoom softly
+    pat.setTransform(new DOMMatrix([sc, 0, 0, sc, (tx % 256) * 1, (ty % 256) * 1]));
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = 'soft-light';
+    ctx.globalAlpha = sat ? 0.5 : 0.25;
+    ctx.fillStyle = pat;
+    ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+    ctx.restore();
+    void dpr;
+  }
+
+  private disposed = false;
+  private building = new Set<Theme>();
+  /** True while the terrain texture for the current theme is still being prepared. */
+  get loading() {
+    return !this.bases.has(this.theme);
+  }
+  private want: Theme = 'satelit';
+
+  /** Stop background work (map replaced). */
+  dispose() {
+    this.disposed = true;
+  }
+
+  /** Switch theme; the previous one keeps showing until the new terrain is ready (no blank flash). */
   setTheme(theme: Theme) {
-    this.theme = theme;
-    if (!this.bases.has(theme)) this.bases.set(theme, buildBase(this.map, theme));
+    this.want = theme;
+    if (this.bases.has(theme)) { this.theme = theme; return; }
+    if (this.building.has(theme)) return;
+    const p = this.map.params;
+    const key = `${p.seed}|${p.shape}|${p.size}|${theme}`;
+    const cached = baseCache.get(key);
+    if (cached) { this.bases.set(theme, cached); this.theme = theme; return; }
+    this.building.add(theme);
+    void buildBase(this.map, theme, undefined, () => this.disposed).then((b) => {
+      this.building.delete(theme);
+      if (!b) return;
+      baseCache.set(key, b);
+      if (baseCache.size > 4) baseCache.delete(baseCache.keys().next().value as string);
+      if (!this.disposed) { this.bases.set(theme, b); if (this.want === theme) this.theme = theme; }
+    });
+  }
+
+  /** 0 = lean, 1 = balanced, 2 = full. Lowered automatically when frames run long. */
+  quality = 2;
+  private flight: { from: Camera; to: Camera; t0: number; dur: number } | null = null;
+
+  setQuality(q: number) {
+    this.quality = Math.max(0, Math.min(2, q));
+    this.fx.density = [0.35, 0.65, 1][this.quality];
+    this.resize();
+  }
+
+  /** Smooth camera move (ease in-out). Cancelled by any manual camera input via cancelFlight(). */
+  flyTo(x: number, y: number, zoom: number, dur = 340) {
+    this.flight = { from: { ...this.cam }, to: { x, y, zoom }, t0: performance.now(), dur };
+  }
+  cancelFlight() { this.flight = null; }
+  stepFlight(now: number): boolean {
+    const f = this.flight;
+    if (!f) return false;
+    const k = clamp((now - f.t0) / f.dur, 0, 1);
+    const e = k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
+    this.cam.x = f.from.x + (f.to.x - f.from.x) * e;
+    this.cam.y = f.from.y + (f.to.y - f.from.y) * e;
+    this.cam.zoom = f.from.zoom * Math.pow(f.to.zoom / f.from.zoom, e);
+    this.clampCam();
+    if (k >= 1) this.flight = null;
+    return true;
   }
 
   resize() {
     const r = this.canvas.getBoundingClientRect();
-    this.dpr = Math.min(2, window.devicePixelRatio || 1);
+    this.dpr = Math.min([1, 1.5, 2][this.quality], window.devicePixelRatio || 1);
     this.W = r.width;
     this.H = r.height;
     this.canvas.width = Math.round(r.width * this.dpr);
@@ -171,8 +252,10 @@ export class Renderer {
   clampCam() {
     this.cam.zoom = clamp(this.cam.zoom, this.minZoom(), 6);
     const hw = this.W / 2 / this.cam.zoom, hh = this.H / 2 / this.cam.zoom;
-    this.cam.x = hw * 2 >= this.map.w ? this.map.w / 2 : clamp(this.cam.x, hw, this.map.w - hw);
-    this.cam.y = hh * 2 >= this.map.h ? this.map.h / 2 : clamp(this.cam.y, hh, this.map.h - hh);
+    // a little overscroll past the coast (35% of half the view) so action at the map edge can be centred
+    const mx = hw * 0.35, my = hh * 0.35;
+    this.cam.x = hw * 2 >= this.map.w ? this.map.w / 2 : clamp(this.cam.x, hw - mx, this.map.w - hw + mx);
+    this.cam.y = hh * 2 >= this.map.h ? this.map.h / 2 : clamp(this.cam.y, hh - my, this.map.h - hh + my);
   }
 
   screenToWorld(sx: number, sy: number): Pt {
@@ -206,24 +289,6 @@ export class Renderer {
   orderLine(o: Order): Pt[] {
     if ((o.kind === 'serang' || o.kind === 'gerak') && o.stroke && o.stroke.length >= 2) return o.stroke;
     return this.route((o as { path: number[] }).path);
-  }
-
-  private provCells: (Int32Array | null)[] = [];
-  /** Grid cells belonging to a province (lazy). */
-  cellsOf(i: number): Int32Array {
-    let c = this.provCells[i];
-    if (c) return c;
-    const m = this.map;
-    const b = m.provinces[i].bbox;
-    const out: number[] = [];
-    for (let gy = Math.floor(b.y0 / m.cell); gy < Math.ceil(b.y1 / m.cell); gy++)
-      for (let gx = Math.floor(b.x0 / m.cell); gx < Math.ceil(b.x1 / m.cell); gx++) {
-        const k = gy * m.gw + gx;
-        if (gx >= 0 && gy >= 0 && gx < m.gw && gy < m.gh && m.cellProv[k] === i) out.push(k);
-      }
-    c = Int32Array.from(out);
-    this.provCells[i] = c;
-    return c;
   }
 
   private borderCache = new Map<number, Pt[]>();
@@ -315,23 +380,6 @@ export class Renderer {
       out.push({ x: p.x + nx * off, y: p.y + ny * off });
     }
     return out;
-  }
-
-  private dotPattern(color: string, dense = false): CanvasPattern {
-    const key = color + dense;
-    let p = this.patterns.get(key);
-    if (p) return p;
-    const c = document.createElement('canvas');
-    const s = dense ? 6 : 9;
-    c.width = c.height = s;
-    const x = c.getContext('2d')!;
-    x.fillStyle = color;
-    x.beginPath();
-    x.arc(s / 2, s / 2, dense ? 1.5 : 1.7, 0, Math.PI * 2);
-    x.fill();
-    p = this.ctx.createPattern(c, 'repeat')!;
-    this.patterns.set(key, p);
-    return p;
   }
 
   private hatchPattern(kind: number, color: string): CanvasPattern {
@@ -459,8 +507,8 @@ export class Renderer {
       }
       const ps = s.provs[i];
       if (from === undefined && (c !== ps.owner || (ps.integration < 1 && c === ps.ctrl))) {
-        // occupied / being integrated: stipple like an advancing zone
-        ctx.fillStyle = this.dotPattern(hexA(k.color, sat ? 0.95 : 0.8), true);
+        // occupied / being integrated: fine diagonal hatch in the occupier's colour
+        ctx.fillStyle = this.hatchPattern(0, hexA(k.color, sat ? 0.55 : 0.5));
         ctx.fill(this.provPath[i]);
       }
     }
@@ -496,9 +544,12 @@ export class Renderer {
           if (!k) continue;
           ctx.save();
           ctx.clip(this.provPath[side]);
-          ctx.strokeStyle = this.dotPattern(shadeA(k.color, 0.25, 1), true);
-          ctx.lineWidth = 16 / z;
-          this.strokePts(arc.pts);
+          // soft glow band on each side of the front, in that side's colour
+          for (const [w, a] of [[26, 0.07], [16, 0.12], [8, 0.2]] as const) {
+            ctx.strokeStyle = shadeA(k.color, 0.2, a);
+            ctx.lineWidth = w / z;
+            this.strokePts(arc.pts);
+          }
           ctx.restore();
         }
         ctx.strokeStyle = 'rgba(255,60,60,0.35)';
@@ -548,7 +599,15 @@ export class Renderer {
     const tx = dpr * (this.W / 2 - this.cam.x * z + shake.x);
     const ty = dpr * (this.H / 2 - this.cam.y * z + shake.y);
     ctx.setTransform(dpr * z, 0, 0, dpr * z, tx, ty);
-    const base = this.bases.get(this.theme)!;
+    const base = this.bases.get(this.theme);
+    if (!base) {
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = 'rgba(255,255,255,0.55)';
+      ctx.font = `700 14px ${COUNTER_FONT}`;
+      ctx.textAlign = 'center';
+      ctx.fillText('Menyiapkan peta…', this.W / 2, this.H / 2);
+      return;
+    }
     ctx.imageSmoothingEnabled = true;
     if (v.mode === 'curtain') {
       ctx.drawImage(base.canvas, 0, 0, map.w, map.h);
@@ -567,9 +626,9 @@ export class Renderer {
     } else {
       // zoomed in: draw vectors directly for crispness
       ctx.drawImage(base.canvas, 0, 0, map.w, map.h);
-      if (base.grain) { ctx.fillStyle = base.grain; ctx.fillRect(0, 0, map.w, map.h); }
       this.drawLayers(v, now, z, annexFrom);
     }
+    this.drawDetail(base, z, dpr, tx, ty, sat);
 
     // ---- progressive capture: control spreads cell by cell from the entry point ----
     for (const an of v.annex) this.drawGrowth(an, v, vt, base.canvas, fillA);
@@ -637,9 +696,17 @@ export class Renderer {
       ctx.lineWidth = v.draft.width + 3;
       if (v.draft.dashed) ctx.setLineDash([12, 9]);
       this.strokeScreen(v.draft.pts);
-      ctx.strokeStyle = v.draft.color;
+      ctx.strokeStyle = v.draft.bad ? '#ff5a4f' : v.draft.color;
       ctx.lineWidth = v.draft.width;
       this.strokeScreen(v.draft.pts);
+      // start marker: a ring at the army the arrow leaves from
+      const st = this.worldToScreen(v.draft.pts[0].x, v.draft.pts[0].y);
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.arc(st.x, st.y, 11 + 2 * Math.sin(now / 90), 0, Math.PI * 2);
+      ctx.strokeStyle = v.draft.bad ? '#ff5a4f' : '#ffffff';
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
       ctx.restore();
       if (v.draft.odds !== undefined) {
         const end = v.draft.pts[v.draft.pts.length - 1];
@@ -789,11 +856,10 @@ export class Renderer {
         c.lineWidth = 2.5 / z;
         c.stroke();
         c.restore();
-        this.label('✈ UDARA', o.x, o.y, color);
+        this.label('UDARA', o.x, o.y, color);
         break;
       }
       case 'bangun': {
-        const icon = { pabrik: '🏭', pabrikMil: '⚙️', benteng: '🏰', pelabuhan: '⚓', kota: '🏙️', jalan: '🛤️' }[o.what];
         if (o.what === 'jalan' && o.path && o.path.length > 1) {
           c.save();
           c.globalAlpha = alpha;
@@ -806,7 +872,7 @@ export class Renderer {
           this.strokePts(this.route(o.path));
           c.restore();
         }
-        this.label(icon, P[o.prov].x + 18 / z, P[o.prov].y - 18 / z, '#fff', 16);
+        this.badge(o.what, P[o.prov].x, P[o.prov].y, color);
         break;
       }
       case 'rekrut':
@@ -831,7 +897,7 @@ export class Renderer {
     }
     if (invalid && d.reason && (o.kind === 'serang' || o.kind === 'gerak')) {
       const t = pointAlong(this.orderLine(o), 0.5);
-      this.label('⚠ ' + d.reason, t.x, t.y - 14 / z, '#ff6b5e', 12);
+      this.label(d.reason, t.x, t.y - 14 / z, '#ff6b5e', 12);
     }
   }
 
@@ -863,6 +929,29 @@ export class Renderer {
     c.textAlign = 'center';
     c.textBaseline = 'middle';
     c.fillText(text, sp.x, sp.y + 0.5);
+    c.restore();
+  }
+
+  private iconImgs = new Map<string, HTMLImageElement>();
+
+  /** Round badge with a vector icon at a world position (constant screen size). */
+  private badge(name: keyof typeof ICONS, wx: number, wy: number, accent: string) {
+    const key = name;
+    let img = this.iconImgs.get(key);
+    if (!img) { img = new Image(); img.src = iconUrl(name, '#ffffff', 2); this.iconImgs.set(key, img); }
+    const c = this.ctx;
+    const sp = this.worldToScreen(wx + 0, wy);
+    const x = sp.x + 16, y = sp.y - 16;
+    c.save();
+    c.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    c.beginPath();
+    c.arc(x, y, 13, 0, Math.PI * 2);
+    c.fillStyle = 'rgba(10,15,24,0.92)';
+    c.fill();
+    c.lineWidth = 2;
+    c.strokeStyle = accent;
+    c.stroke();
+    if (img.complete && img.naturalWidth) c.drawImage(img, x - 8, y - 8, 16, 16);
     c.restore();
   }
 
@@ -1007,70 +1096,119 @@ export class Renderer {
   }
 
   /**
-   * Cell-level growth of a captured province. Cells reveal by distance from the entry point
-   * (+ noise), so ground is painted in: faint stipple leads, a bright rim follows, the
-   * interior fills behind it. Old colour is wiped by redrawing terrain under revealed cells.
+   * Fluid growth of a captured province: control spreads from the entry point as an organic
+   * blob whose outline breathes (low-frequency noise), with a soft glowing rim. The old
+   * owner's colour is wiped by redrawing terrain inside the blob, then the new colour goes on.
    */
   private drawGrowth(an: AnnexAnim, v: View, now: number, base: HTMLCanvasElement, fillA: number) {
     if (now < an.t0 || now > an.t0 + an.dur) return;
     const k = v.state.countries[an.to];
     if (!k) return;
     const ctx = this.ctx;
+    const z = this.cam.zoom;
     const m = this.map;
-    const P = m.provinces;
-    const bb = P[an.prov].bbox;
-    const maxR = Math.hypot(Math.max(an.ex - bb.x0, bb.x1 - an.ex), Math.max(an.ey - bb.y0, bb.y1 - an.ey)) + 1;
-    const jitter = maxR * 0.28;
-    const T = (now - an.t0) / an.dur;
-    const R = T * (maxR + jitter + 12);
-    const rim = 9, lead = 14;
-    const cs = m.cell;
-    const cells = this.cellsOf(an.prov);
-    const solid = new Path2D(), rimP = new Path2D(), leadP = new Path2D();
-    for (let n = 0; n < cells.length; n++) {
-      const ci = cells[n];
-      const gx = ci % m.gw, gy = (ci / m.gw) | 0;
-      const x = gx * cs, y = gy * cs;
-      const hsh = Math.sin(ci * 12.9898) * 43758.5453;
-      const r01 = hsh - Math.floor(hsh);
-      const d = Math.hypot(x + cs / 2 - an.ex, y + cs / 2 - an.ey) + r01 * jitter;
-      if (d < R - rim) solid.rect(x - 0.3, y - 0.3, cs + 0.6, cs + 0.6);
-      else if (d < R) { solid.rect(x - 0.3, y - 0.3, cs + 0.6, cs + 0.6); rimP.rect(x + 0.6, y + 0.6, cs - 1.2, cs - 1.2); }
-      else if (d < R + lead && r01 > 0.55) leadP.rect(x + cs * 0.3, y + cs * 0.3, cs * 0.45, cs * 0.45);
+    const bb = m.provinces[an.prov].bbox;
+    const maxR = Math.hypot(Math.max(an.ex - bb.x0, bb.x1 - an.ex), Math.max(an.ey - bb.y0, bb.y1 - an.ey));
+    const T = clamp((now - an.t0) / an.dur, 0, 1);
+    const ease = 1 - Math.pow(1 - T, 1.7);
+    const R = ease * (maxR * 1.32 + 10);
+    const seed = an.prov * 1.713;
+    const wob = (th: number) =>
+      0.5 * Math.sin(3 * th + seed + now * 0.0007) + 0.3 * Math.sin(5 * th + 2 * seed - now * 0.0011) + 0.2 * Math.sin(9 * th + 3 * seed + now * 0.0017);
+    const N = 56;
+    const pts: Pt[] = [];
+    for (let i = 0; i < N; i++) {
+      const th = (i / N) * Math.PI * 2;
+      const r = R * (1 + 0.2 * wob(th) * Math.min(1, T * 4));
+      pts.push({ x: an.ex + Math.cos(th) * r, y: an.ey + Math.sin(th) * r });
     }
+    const blob = new Path2D();
+    const mid = (a: Pt, b: Pt) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+    const m0 = mid(pts[N - 1], pts[0]);
+    blob.moveTo(m0.x, m0.y);
+    for (let i = 0; i < N; i++) { const c = pts[i], e = mid(pts[i], pts[(i + 1) % N]); blob.quadraticCurveTo(c.x, c.y, e.x, e.y); }
+    blob.closePath();
     ctx.save();
     ctx.clip(this.provPath[an.prov]);
     ctx.save();
-    ctx.clip(solid);
+    ctx.clip(blob);
     ctx.drawImage(base, 0, 0, m.w, m.h);
     ctx.fillStyle = hexA(k.color, fillA);
     ctx.fill(this.provPath[an.prov]);
     ctx.restore();
-    ctx.fillStyle = shadeA(k.color, 0.2, 0.95);
-    ctx.fill(rimP);
-    ctx.fillStyle = hexA(k.color, 0.75);
-    ctx.fill(leadP);
+    // soft rim: wide faint → narrow bright, fading out as the front dies against the province edge
+    const fade = 1 - Math.pow(T, 4);
+    ctx.lineJoin = 'round';
+    for (const [w, a] of [[30, 0.07], [18, 0.12], [9, 0.22]] as const) {
+      ctx.strokeStyle = shadeA(k.color, 0.25, a * fade);
+      ctx.lineWidth = w / z;
+      ctx.stroke(blob);
+    }
+    ctx.strokeStyle = this.theme === 'satelit' ? `rgba(255,255,255,${0.75 * fade})` : shadeA(k.color, -0.35, 0.9 * fade);
+    ctx.lineWidth = 1.8 / z;
+    ctx.stroke(blob);
     ctx.restore();
   }
 
-  /** One unit marker: a square chip (satellite) or a round token (cartoon). */
-  private chip(x: number, y: number, sz: number, color: string, faded: boolean, sat: boolean) {
-    const c = this.ctx;
-    if (sat) {
-      c.fillStyle = faded ? hexA(color, 0.6) : color;
-      c.fillRect(x - sz / 2, y - sz / 2, sz, sz);
-      c.strokeStyle = 'rgba(0,0,0,0.7)';
-      c.lineWidth = 0.8;
-      c.strokeRect(x - sz / 2, y - sz / 2, sz, sz);
-    } else {
-      c.beginPath();
-      c.arc(x, y, sz / 2 + 0.5, 0, Math.PI * 2);
-      c.fillStyle = color;
-      c.fill();
-      c.strokeStyle = '#111';
-      c.lineWidth = 1.1;
-      c.stroke();
-    }
+  private chipSprites = new Map<string, HTMLCanvasElement>();
+
+  /** Pre-rendered unit token (supersampled 3×) so thousands of draws stay crisp and cheap. */
+  private chipSprite(color: string, sat: boolean, faded: boolean): HTMLCanvasElement {
+    const key = `${color}|${sat}|${faded}`;
+    let c = this.chipSprites.get(key);
+    if (c) return c;
+    const S = 3, w = 11, h = 9;
+    c = document.createElement('canvas');
+    c.width = w * S;
+    c.height = h * S;
+    const x = c.getContext('2d')!;
+    x.scale(S, S);
+    x.globalAlpha = faded ? 0.6 : 1;
+    // soft contact shadow
+    const sh = x.createRadialGradient(w / 2, h / 2 + 1.6, 0.5, w / 2, h / 2 + 1.6, 4.6);
+    sh.addColorStop(0, 'rgba(0,0,0,0.38)');
+    sh.addColorStop(1, 'rgba(0,0,0,0)');
+    x.fillStyle = sh;
+    x.beginPath();
+    x.ellipse(w / 2, h / 2 + 1.6, 4.8, 3, 0, 0, Math.PI * 2);
+    x.fill();
+    const body = sat ? { bw: 6.6, bh: 4.4, r: 1.5 } : { bw: 5.8, bh: 5.8, r: 2.9 };
+    const bx = (w - body.bw) / 2, by = (h - body.bh) / 2 - 0.4;
+    const g = x.createLinearGradient(0, by, 0, by + body.bh);
+    g.addColorStop(0, shade(color, 0.32));
+    g.addColorStop(0.55, color);
+    g.addColorStop(1, shade(color, -0.3));
+    x.fillStyle = g;
+    x.beginPath();
+    this.roundRectPath(x, bx, by, body.bw, body.bh, body.r);
+    x.fill();
+    x.lineWidth = 0.7;
+    x.strokeStyle = 'rgba(8,10,16,0.75)';
+    x.stroke();
+    // specular edge
+    x.strokeStyle = 'rgba(255,255,255,0.35)';
+    x.lineWidth = 0.5;
+    x.beginPath();
+    x.moveTo(bx + body.r, by + 0.6);
+    x.lineTo(bx + body.bw - body.r, by + 0.6);
+    x.stroke();
+    this.chipSprites.set(key, c);
+    return c;
+  }
+
+  private roundRectPath(c: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+    r = Math.min(r, w / 2, h / 2);
+    c.moveTo(x + r, y);
+    c.arcTo(x + w, y, x + w, y + h, r);
+    c.arcTo(x + w, y + h, x, y + h, r);
+    c.arcTo(x, y + h, x, y, r);
+    c.arcTo(x, y, x + w, y, r);
+    c.closePath();
+  }
+
+  /** One unit marker. */
+  private chip(x: number, y: number, _sz: number, color: string, faded: boolean, sat: boolean) {
+    this.ctx.drawImage(this.chipSprite(color, sat, faded), x - 5.5, y - 4.5, 11, 9);
   }
 
   /** Flank guards: chips run from the column to the threatened border and line up there. */
@@ -1145,7 +1283,7 @@ export class Renderer {
       const hs = this.worldToScreen(head.x, head.y);
       const rows = clamp(Math.ceil(col.troops / 7000), 1, 5);
       const per = clamp(Math.ceil(col.troops / 2500 / rows), 2, 4);
-      const gap = 7, sz = sat ? 5 : 5.5;
+      const gap = 7;
       // column block slots (rotated behind the head)
       const ca = Math.cos(ang), sa = Math.sin(ang);
       const slots: Pt[] = [];
@@ -1158,15 +1296,28 @@ export class Renderer {
       const kl = col.lineK > 0 && col.lineB >= 0 ? col.lineK * col.lineK * (3 - 2 * col.lineK) : 0;
       const line = kl > 0 ? this.lineSlots(col.lineA, col.lineB, slots.length, (p) => v.ctrl[p] !== col.owner && atWar(s, col.owner, v.ctrl[p])) : null;
       c.globalAlpha = col.alpha;
-      let cx = 0, cy = 0;
-      slots.forEach((sl, i) => {
+      const pos = slots.map((sl, i) => {
         let x = sl.x, y = sl.y;
         if (line) { x += (line[i].x - x) * kl; y += (line[i].y - y) * kl; }
-        if (col.fighting) { x += Math.sin(now / 45 + i * 3) * 1.4; y += Math.cos(now / 38 + i * 2) * 1.1; }
-        cx += x; cy += y;
-        this.chip(x, y, sz, kc, col.kind === 'mundur', sat);
+        if (col.fighting) { x += Math.sin(now / 70 + i * 3) * 0.9; y += Math.cos(now / 61 + i * 2) * 0.7; }
+        else y += Math.sin(now / 320 + i * 1.7) * 0.45; // marching sway
+        return { x, y };
       });
-      cx /= slots.length; cy /= slots.length;
+      let cx = 0, cy = 0;
+      for (const q of pos) { cx += q.x; cy += q.y; }
+      cx /= pos.length; cy /= pos.length;
+      // soft footprint under the formation: reads as mass rather than scattered specks
+      let rad = 0;
+      for (const q of pos) rad = Math.max(rad, Math.hypot(q.x - cx, q.y - cy));
+      rad += 11;
+      const fg = c.createRadialGradient(cx, cy, 2, cx, cy, rad);
+      fg.addColorStop(0, hexA(kc, col.fighting ? 0.42 : 0.3));
+      fg.addColorStop(1, hexA(kc, 0));
+      c.fillStyle = fg;
+      c.beginPath();
+      c.arc(cx, cy, rad, 0, Math.PI * 2);
+      c.fill();
+      for (const q of pos) this.chip(q.x, q.y, 0, kc, col.kind === 'mundur', sat);
       // unit card: white box, flag, bold caps, one strength figure (as in the reference)
       if (col.troops >= 1500 && col.kind !== 'mundur') {
         const name = (k.name.length <= 12 ? k.name : k.name.split(' ').pop() ?? k.name).toUpperCase();
@@ -1174,10 +1325,12 @@ export class Renderer {
         c.font = `800 10px ${COUNTER_FONT}`;
         const w = Math.max(c.measureText(name).width, c.measureText(txt).width) + 26;
         const bx = cx + 12, by = cy - 36;
-        c.fillStyle = 'rgba(0,0,0,0.35)';
-        c.fillRect(bx + 1.5, by + 1.5, w, 24);
-        c.fillStyle = '#f4f4f0';
-        c.fillRect(bx, by, w, 24);
+        c.fillStyle = 'rgba(0,0,0,0.3)';
+        c.beginPath(); this.roundRectPath(c, bx + 1, by + 2, w, 24, 6); c.fill();
+        c.fillStyle = '#f5f5f1';
+        c.beginPath(); this.roundRectPath(c, bx, by, w, 24, 6); c.fill();
+        c.fillStyle = k.color;
+        c.beginPath(); this.roundRectPath(c, bx, by + 4, 2.6, 16, 1.3); c.fill();
         c.drawImage(flagBitmap(k.flag, 12, 8), bx + 3, by + 3, 14, 10);
         c.fillStyle = '#111';
         c.textAlign = 'left';

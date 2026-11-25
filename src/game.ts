@@ -19,17 +19,28 @@ import { planAI } from './sim/ai';
 import { resolveTurn, fmtInt, scoreOf } from './sim/sim';
 import type { BuildKind, Frac, GameState, Order, ProposalKind, Resolution } from './sim/types';
 import { buildLobby, type LobbyConfig } from './ui/lobby';
-import { h, svg, ICONS } from './ui/dom';
+import { h, svg, iconEl, ICONS } from './ui/dom';
 
-type Tool = 'panah' | 'gerak' | 'garis' | 'udara' | 'bangun' | 'hangus';
+type Tool = 'geser' | 'panah' | 'gerak' | 'garis' | 'udara' | 'bangun' | 'hangus';
 type Phase = 'lobby' | 'curtain' | 'plan' | 'resolve' | 'report' | 'over';
 type Tab = 'provinsi' | 'negara' | 'diplomasi' | 'laporan';
 
 const SAVE_KEY = 'garisdepan.save';
-const TOOLS: [Tool, string, string][] = [
-  ['panah', 'Serang', '1'], ['gerak', 'Gerak', '2'], ['garis', 'Garis', '3'],
-  ['udara', 'Udara', '4'], ['bangun', 'Bangun', '5'], ['hangus', 'Hangus', '6'],
-];
+const PRIMARY: [Tool, string][] = [['geser', 'Geser'], ['panah', 'Serang'], ['gerak', 'Gerak'], ['garis', 'Garis']];
+const MORE: [Tool, string][] = [['udara', 'Udara'], ['bangun', 'Bangun'], ['hangus', 'Hangus']];
+/** Keyboard 1–6 → drawing tools (Geser is H). */
+const KEY_TOOLS: Tool[] = ['panah', 'gerak', 'garis', 'udara', 'bangun', 'hangus'];
+const COACH_KEY = 'garisdepan.coach';
+const TOOL_HINT: Record<Tool, string> = {
+  geser: 'Geser peta dengan satu jari',
+  panah: 'Tarik dari pasukanmu ke musuh',
+  gerak: 'Tarik untuk memindah pasukan',
+  garis: 'Gores sepanjang perbatasanmu',
+  udara: 'Lingkari area misi udara · −40 kas',
+  bangun: 'Ketuk provinsimu untuk membangun',
+  hangus: 'Ketuk provinsimu untuk bumi hangus',
+};
+
 
 export class Game {
   map!: GameMap;
@@ -61,6 +72,25 @@ export class Game {
   previewState: GameState | null = null;
   private lastT = performance.now();
   private nextAmbient = 0;
+  private frameEma = 16.7;
+  private qualityCool = 0;
+  private haptics = (() => { try { return localStorage.getItem('garisdepan.haptic') !== '0'; } catch { return true; } })();
+
+  /** Short vibration on supporting phones: confirms commits without looking at the screen. */
+  private haptic(p: number | number[]) {
+    if (!this.haptics) return;
+    try { navigator.vibrate?.(p); } catch { /* unsupported */ }
+  }
+
+  /** Double-tap: zoom into the tapped spot; again to return to the whole map. */
+  private doubleTap(sx: number, sy: number) {
+    if (this.phase === 'lobby' || this.phase === 'curtain' || this.phase === 'resolve') return;
+    const w = this.r.screenToWorld(sx, sy);
+    const fit = Math.min(this.r.W / this.map.w, this.r.H / this.map.h);
+    const z = this.r.cam.zoom;
+    if (z < fit * 2.4) this.r.flyTo(w.x, w.y, Math.min(5, Math.max(z * 2.2, fit * 2.6)));
+    else this.r.flyTo(this.map.w / 2, this.map.h / 2, fit * 1.02, 420);
+  }
   private lastCam = { x: 0, y: 0 };
   private ui: HTMLElement;
   private canvas: HTMLCanvasElement;
@@ -82,6 +112,7 @@ export class Game {
   // =====================================================================
   private setMap(map: GameMap, theme: GameState['settings']['theme']) {
     this.map = map;
+    this.r?.dispose();
     this.r = new Renderer(this.canvas, map);
     this.r.resize();
     this.r.setTheme(theme);
@@ -92,10 +123,10 @@ export class Game {
     this.dir.onSound = (k, i) => {
       if (k === 'boom') { if (Math.random() < 0.5) this.audio.boom(i); }
       else if (k === 'plane') this.audio.plane();
-      else this.audio.sting(k === 'capture' ? 'capture' : 'moment');
+      else { this.audio.sting(k === 'capture' ? 'capture' : 'moment'); if (k === 'capture') this.haptic(10); }
     };
     this.input = new Input(this.canvas, this.r, {
-      strokeStart: (x, y) => this.strokeStart(x, y),
+      strokeStart: (x, y, touch) => this.strokeStart(x, y, touch),
       strokeMove: (x, y) => this.strokeMove(x, y),
       strokeEnd: (pts) => this.strokeEnd(pts),
       strokeCancel: () => { this.draft = null; this.audio.stopScribble(); },
@@ -103,7 +134,8 @@ export class Game {
       longPress: (x, y) => this.longPress(x, y),
       wheelDuringStroke: (d) => { this.frac = d > 0 ? (this.frac === 1 ? 0.5 : 0.25) : this.frac === 0.25 ? 0.5 : 1; this.toast(`Kekuatan panah: ${this.frac * 100}%`); },
       threeFingerSwipe: (d) => (d < 0 ? this.undo() : this.redo()),
-      onCameraMove: () => this.hideFloating(),
+      doubleTap: (x, y) => this.doubleTap(x, y),
+      onCameraMove: () => { this.r.cancelFlight(); this.hideFloating(); },
     });
   }
 
@@ -177,19 +209,27 @@ export class Game {
     e.fracbar = h('div', { id: 'fracbar', class: 'panel hidden' });
     e.buildmenu = h('div', { id: 'buildmenu', class: 'panel hidden' });
     e.overlay = h('div', { id: 'overlay' });
-    e.sheetToggle = h('button', { id: 'sheetToggle', class: 'panel hidden', onclick: () => { this.sheetOpen = true; this.renderSheet(); } }, '◂ Info');
-    this.ui.append(e.stamp, e.tally, e.moment, e.topbar, e.sheet, e.sheetToggle, e.dock, e.playbar, e.fracbar, e.buildmenu, e.toast, e.overlay);
+    e.scrim = h('div', { id: 'scrim', class: 'hidden', onclick: () => this.closeSheet() });
+    e.peek = h('div', { id: 'peek', class: 'panel hidden' });
+    e.more = h('div', { id: 'more', class: 'panel hidden' });
+    this.ui.append(e.stamp, e.tally, e.moment, e.topbar, e.scrim, e.sheet, e.peek, e.dock, e.more, e.playbar, e.fracbar, e.buildmenu, e.toast, e.overlay);
 
-    // dock
-    const tools = h('div', { class: 'tools' }, TOOLS.map(([t, label, key]) =>
-      h('button', { class: 'tool', 'data-tool': t, title: `${label} (${key})`, onclick: () => this.setTool(t) }, svg(ICONS[t]), label)));
+    // dock: every tool is visible; rarely used ones live under "Lainnya"
+    const toolBtn = (t: Tool, label: string) =>
+      h('button', { class: 'tool', 'data-tool': t, 'aria-label': label, onclick: () => this.setTool(t) }, svg(ICONS[t]), h('span', null, label));
+    e.moreBtn = h('button', { class: 'tool', 'aria-label': 'Alat lain', onclick: () => this.toggleMore() }, svg(ICONS.lainnya), h('span', null, 'Alat'));
+    e.undoBtn = h('button', { class: 'tool undo', 'aria-label': 'Batal', title: 'Batal (Ctrl+Z)', onclick: () => this.undo() }, svg(ICONS.undo), h('span', null, 'Batal'));
+    e.doneBtn = h('button', { class: 'done', onclick: () => this.finishPlan() }, 'SELESAI');
     e.dock.append(
-      tools,
+      h('div', { class: 'tools' }, ...PRIMARY.map(([t, l]) => toolBtn(t, l)), e.moreBtn),
       h('div', { class: 'sep' }),
-      h('button', { class: 'tool', title: 'Batal (Ctrl+Z)', onclick: () => this.undo() }, svg(ICONS.undo), 'Batal'),
-      h('button', { class: 'tool hide-sm', title: 'Ulang (Ctrl+Y)', onclick: () => this.redo() }, svg(ICONS.redo), 'Ulang'),
-      h('button', { class: 'done', onclick: () => this.finishPlan() }, 'SELESAI'));
-    this.setTool('panah');
+      e.undoBtn,
+      e.doneBtn);
+    e.more.append(
+      ...MORE.map(([t, l]) => toolBtn(t, l)),
+      h('button', { class: 'tool', 'aria-label': 'Ulang', title: 'Ulang (Ctrl+Y)', onclick: () => { this.redo(); this.toggleMore(false); } }, svg(ICONS.redo), h('span', null, 'Ulang')));
+    this.setTool('geser', true);
+    this.setTool('panah', true);
 
     // playbar
     const pb = e.playbar;
@@ -205,38 +245,64 @@ export class Game {
     if (!Recorder.supported()) recBtn.classList.add('hidden');
   }
 
-  private setTool(t: Tool) {
+  private setTool(t: Tool, quiet = false) {
     this.tool = t;
+    const isMore = MORE.some(([m]) => m === t);
     this.els.dock?.querySelectorAll('.tool[data-tool]').forEach((b) => b.classList.toggle('active', (b as HTMLElement).dataset.tool === t));
+    this.els.more?.querySelectorAll('.tool[data-tool]').forEach((b) => b.classList.toggle('active', (b as HTMLElement).dataset.tool === t));
+    // the "Lainnya" button shows the active rarely-used tool
+    const mb = this.els.moreBtn;
+    if (mb) {
+      mb.classList.toggle('active', isMore);
+      // the icon shows which rarely-used tool is active; the label stays short so it never collides with Batal
+      mb.replaceChildren(svg(isMore ? ICONS[t as keyof typeof ICONS] : ICONS.lainnya), h('span', null, 'Alat'));
+    }
     this.hideFloating();
-    const hints: Record<Tool, string> = {
-      panah: 'Tarik dari pasukanmu ke target. Lingkari wilayah musuh untuk operasi jepit.',
-      gerak: 'Tarik untuk memindahkan pasukan tanpa menyerang.',
-      garis: 'Gores di sepanjang perbatasanmu untuk garis pertahanan.',
-      udara: 'Lingkari area untuk misi udara (−40 kas).',
-      bangun: 'Ketuk provinsimu untuk membangun; gores garis untuk jalan/rel.',
-      hangus: 'Ketuk provinsimu untuk bumi hangus.',
-    };
-    if (this.phase === 'plan') this.toast(hints[t], 2200);
+    this.toggleMore(false);
+    if (this.phase === 'plan' && !quiet) this.toast(TOOL_HINT[t], 2000);
+  }
+
+  private toggleMore(force?: boolean) {
+    const m = this.els.more;
+    if (!m) return;
+    const show = force ?? m.classList.contains('hidden');
+    m.classList.toggle('hidden', !show);
+  }
+
+  closeSheet() {
+    this.sheetOpen = false;
+    this.renderSheet();
+  }
+
+  /** Wide layouts (desktop / landscape tablet) dock the panel at the side instead of covering the map. */
+  private isWide() {
+    return window.matchMedia('(min-aspect-ratio: 5/4) and (min-width: 760px) and (min-height: 521px)').matches;
   }
 
   private updateTopbar() {
     const tb = this.els.topbar;
     if (!tb || this.phase !== 'plan') return;
-    const k = this.state.countries[this.current];
-    const spend = pendingSpend(this.state, this.orders[this.current]);
-    const date = fmtDate(dateOf(this.state));
-    const troops = totalTroops(this.state, this.current);
+    const st = this.state;
+    const k = st.countries[this.current];
+    const spend = pendingSpend(st, this.orders[this.current]);
+    const troops = totalTroops(st, this.current);
+    const attention = st.proposals.filter((p) => p.to === this.current).length + (k.pendingEvent ? 1 : 0);
+    const cash = k.treasury - spend;
     tb.replaceChildren(
-      h('div', { class: 'who' }, h('img', { class: 'flag', src: flagDataUrl(k.flag), alt: '' }), h('b', null, k.name)),
-      h('div', { class: 'date hide-sm' }, date),
+      h('div', { class: 'who' },
+        h('img', { class: 'flag', src: flagDataUrl(k.flag), alt: '' }),
+        h('div', { class: 'name' }, h('b', null, k.name), h('small', null, `${fmtDate(dateOf(st))} · Giliran ${st.turn}`))),
       h('div', { class: 'stats' },
-        h('div', { class: 'stat' }, h('small', null, 'Kas'), h('span', { style: k.treasury - spend < 0 ? 'color:#ff6b5e' : '' }, fmtInt(k.treasury - spend))),
-        h('div', { class: 'stat' }, h('small', null, 'Pasukan'), h('span', null, fmtCompact(troops))),
-        h('div', { class: 'stat hide-sm' }, h('small', null, 'Stabilitas'), h('span', null, Math.round(k.stability) + '%')),
-        this.timerEnd ? h('div', { id: 'timer' }) : null,
-        h('button', { class: 'btn small', title: 'Menu', onclick: () => this.menu() }, svg(ICONS.menu))));
+        h('div', { class: 'pill' + (cash < 0 ? ' bad' : ''), title: 'Kas setelah perintah giliran ini' }, h('small', null, 'KAS'), h('span', null, fmtInt(cash))),
+        h('div', { class: 'pill', title: 'Total pasukan' }, h('small', null, 'PASUKAN'), h('span', null, fmtCompact(troops))),
+        this.timerEnd ? h('div', { id: 'timer' }) : null),
+      h('button', { class: 'iconbtn', 'aria-label': 'Info negara, diplomasi, laporan', onclick: () => { this.sheetOpen = !this.sheetOpen; this.renderSheet(); } },
+        svg(ICONS.info), attention ? h('i', { class: 'dot' }, String(attention)) : null),
+      h('button', { class: 'iconbtn', 'aria-label': 'Menu', onclick: () => this.menu() }, svg(ICONS.menu)));
     document.documentElement.style.setProperty('--pc', k.color);
+    // dock: show how many orders are queued
+    const n = this.orders[this.current]?.length ?? 0;
+    if (this.els.doneBtn) this.els.doneBtn.replaceChildren('SELESAI', n ? h('small', null, `${n} perintah`) : '');
   }
 
   private updatePlaybar() {
@@ -270,6 +336,7 @@ export class Game {
     const m = this.els.moment;
     if (!m) return;
     m.textContent = text;
+    this.haptic(_kind === 'ibukota' || _kind === 'dikepung' ? [30, 50, 30] : 18);
     m.style.color = color;
     m.classList.remove('show');
     void m.offsetWidth;
@@ -330,7 +397,7 @@ export class Game {
     this.els.topbar.classList.add('hidden');
     this.els.dock.classList.add('hidden');
     this.els.sheet.classList.add('hidden');
-    this.els.sheetToggle.classList.add('hidden');
+    this.hideChrome();
     const k = this.state.countries[this.current];
     this.audio.sting('curtain');
     const ring = 2 * Math.PI * 60;
@@ -390,6 +457,7 @@ export class Game {
     this.els.topbar.classList.remove('hidden');
     this.els.dock.classList.remove('hidden');
     this.els.sheet.classList.remove('hidden');
+    this.hideChrome();
     const k = this.state.countries[this.current];
     if (k.capital >= 0) {
       const p = this.map.provinces[k.capital];
@@ -403,26 +471,71 @@ export class Game {
     this.updateTopbar();
     const inbox = this.state.proposals.filter((p) => p.to === this.current).length;
     const priv = this.state.privateNews[this.current] ?? [];
-    if (this.state.turn > 1 || inbox || k.pendingEvent) {
-      this.tab = k.pendingEvent || inbox ? (k.pendingEvent ? 'laporan' : 'diplomasi') : 'laporan';
-      this.sheetOpen = !!(k.pendingEvent || inbox) || priv.length > 0;
+    this.selectedProv = -1;
+    this.doneArmed = false;
+    this.setTool('panah', true);
+    if (inbox || k.pendingEvent) {
+      // decisions waiting: open the panel on them
+      this.tab = k.pendingEvent ? 'laporan' : 'diplomasi';
+      this.sheetOpen = true;
     } else {
-      this.tab = 'negara';
+      this.tab = priv.length ? 'laporan' : 'negara';
       this.sheetOpen = false;
-      this.toast('Tarik panah dari angka pasukanmu ke wilayah musuh. Tekan SELESAI bila siap.', 4200);
     }
     this.renderSheet();
+    if (!this.coached()) this.coachmark();
+  }
+
+  private coached(): boolean {
+    try { return localStorage.getItem(COACH_KEY) === '1'; } catch { return true; }
+  }
+
+  /** One-time guide with an animated gesture; replaces the long text hint. */
+  private coachmark() {
+    const done = () => { try { localStorage.setItem(COACH_KEY, '1'); } catch { /* ignore */ } cm.remove(); };
+    const cm = h('div', { id: 'coach', class: 'panel' },
+      h('div', { class: 'demo', html: `<svg viewBox="0 0 220 96" aria-hidden="true">
+        <rect x="8" y="30" width="86" height="52" rx="8" class="mine"/><rect x="126" y="30" width="86" height="52" rx="8" class="foe"/>
+        <circle cx="50" cy="56" r="7" class="unit"/><path class="arrow" d="M50 56 C 80 20, 130 20, 164 54" /><path class="head" d="M164 54 l-11 -2 l5 -9 z"/>
+        <g class="finger"><circle r="9" /><circle r="3" class="core"/></g></svg>` }),
+      h('div', { class: 'ctext' },
+        h('b', null, 'Gambar perintahmu'),
+        h('ol', null,
+          h('li', null, 'Tarik dari pasukanmu ke wilayah musuh'),
+          h('li', null, 'Dua jari untuk geser & zoom peta'),
+          h('li', null, 'Tekan ', h('b', null, 'SELESAI'), ' bila siap'))),
+      h('button', { class: 'btn primary', onclick: done }, 'Mengerti'));
+    this.ui.append(cm);
+  }
+
+  private doneArmed = false;
+
+  /** Hide planning-only chrome (info panel scrim, province card, tool popover, floating menus). */
+  private hideChrome() {
+    this.els.scrim?.classList.add('hidden');
+    this.els.peek?.classList.add('hidden');
+    this.els.more?.classList.add('hidden');
+    document.getElementById('coach')?.remove();
+    this.hideFloating();
   }
 
   finishPlan() {
     if (this.phase !== 'plan') return;
     const k = this.state.countries[this.current];
+    // ending a turn with no orders at all is usually a stray tap: ask once
+    if (!this.orders[this.current].length && !this.doneArmed && !this.timerEnd) {
+      this.doneArmed = true;
+      this.toast('Belum ada perintah. Tekan SELESAI lagi untuk lewati giliran.', 2800);
+      window.setTimeout(() => (this.doneArmed = false), 3200);
+      return;
+    }
     if (k.pendingEvent && !this.orders[this.current].some((o) => o.kind === 'event')) {
       this.orders[this.current].push({ kind: 'event', choice: 0 });
     }
     // drop invalid orders silently (they're shown red during planning)
     this.orders[this.current] = this.orders[this.current].filter((_, i) => this.validity[i]?.valid !== false);
     this.timerEnd = 0;
+    this.haptic(14);
     this.audio.sting('click');
     this.nextPlanner();
   }
@@ -439,7 +552,7 @@ export class Game {
     this.els.topbar.classList.add('hidden');
     this.els.dock.classList.add('hidden');
     this.els.sheet.classList.add('hidden');
-    this.els.sheetToggle.classList.add('hidden');
+    this.hideChrome();
     this.els.playbar.classList.remove('hidden');
     this.els.stamp.classList.remove('hidden');
     this.els.tally.classList.remove('hidden');
@@ -519,6 +632,7 @@ export class Game {
   }
 
   private addOrder(o: Order) {
+    this.haptic(8);
     this.pushUndo();
     this.myOrders().push(o);
     this.afterOrdersChanged();
@@ -572,21 +686,56 @@ export class Game {
     return p >= 0 && this.state.provs[p].ctrl === this.current;
   }
 
-  private strokeStart(sx: number, sy: number): boolean {
+  /** Provinces the current stroke started from (after snapping), -1 when none. */
+  private startProv = -1;
+  /** True while the stroke has no valid starting province (drawn red and dashed). */
+  private badStart = false;
+
+  /** Nearest own province with troops within `px` screen pixels of (sx, sy). */
+  private nearestOwn(sx: number, sy: number, px: number, minTroops = 100): number {
+    const P = this.map.provinces;
+    let best = -1, bd = px;
+    for (let i = 0; i < P.length; i++) {
+      if (!this.own(i) || this.state.provs[i].troops < minTroops) continue;
+      const sp = this.r.worldToScreen(P[i].x, P[i].y);
+      const d = Math.hypot(sp.x - sx, sp.y - sy);
+      if (d < bd) { bd = d; best = i; }
+    }
+    return best;
+  }
+
+  private strokeStart(sx: number, sy: number, touch: boolean): boolean {
     if (this.phase !== 'plan') return false;
+    this.hideFloating();
+    if (this.tool === 'geser') return false; // explicit pan tool: one finger moves the map
     const w = this.r.screenToWorld(sx, sy);
     const p = this.r.provinceAt(w.x, w.y);
-    this.hideFloating();
+    this.startProv = -1;
+    this.badStart = false;
+    let start: Pt = w;
     let ok = false;
     switch (this.tool) {
-      case 'panah': ok = p >= 0 && (this.own(p) ? this.state.provs[p].troops >= 100 : true); break;
-      case 'gerak': ok = this.own(p) && this.state.provs[p].troops >= 100; break;
-      case 'garis': case 'bangun': ok = this.own(p); break;
-      case 'udara': ok = p >= 0; break;
+      case 'panah':
+      case 'gerak': {
+        // starting on or near your own troops: snap to them so the arrow visibly leaves the army
+        let sp = this.own(p) && this.state.provs[p].troops >= 100 ? p : -1;
+        if (sp < 0) sp = this.nearestOwn(sx, sy, touch ? 64 : 28);
+        if (sp >= 0) {
+          this.startProv = sp;
+          start = { x: this.map.provinces[sp].x, y: this.map.provinces[sp].y };
+          ok = true;
+        } else if (touch) { ok = true; this.badStart = true; }
+        break;
+      }
+      case 'garis': case 'bangun':
+        ok = this.own(p);
+        if (!ok && touch) { ok = true; this.badStart = true; }
+        break;
+      case 'udara': ok = p >= 0 || touch; break;
       default: ok = false;
     }
     if (ok) {
-      this.draft = [w];
+      this.draft = this.startProv >= 0 ? [start, w] : [w];
       this.audio.startScribble();
     }
     return ok;
@@ -604,7 +753,17 @@ export class Game {
     this.audio.stopScribble();
     const draft = this.draft;
     this.draft = null;
+    const bad = this.badStart;
+    this.badStart = false;
     if (!draft || this.phase !== 'plan') return;
+    // a closed loop with the Serang tool is a pincer wherever it starts
+    const loopRec = recognize(raw, this.r.cam.zoom);
+    if (this.tool === 'panah' && loopRec.shape === 'loop') { this.pincer(loopRec.pts); return; }
+    if (bad) {
+      this.haptic([16, 40, 16]);
+      this.toast(this.tool === 'panah' || this.tool === 'gerak' ? 'Mulai dari angka pasukanmu, lalu tarik ke tujuan' : 'Mulai dari provinsimu sendiri', 2400);
+      return;
+    }
     const rec = recognize(draft.length > raw.length ? draft : raw, this.r.cam.zoom);
     const sp = this.r.provinceAt(rec.start.x, rec.start.y);
     const ep = this.r.provinceAt(rec.end.x, rec.end.y);
@@ -613,7 +772,6 @@ export class Game {
     switch (this.tool) {
       case 'panah':
       case 'gerak': {
-        if (this.tool === 'panah' && rec.shape === 'loop') { this.pincer(rec.pts); return; }
         if (!this.own(sp)) { this.toast('Mulai panah dari pasukanmu sendiri.'); return; }
         if (rec.shape === 'tap' || ep < 0 || ep === sp) return;
         const attack = this.tool === 'panah';
@@ -627,7 +785,7 @@ export class Game {
         this.selectOrder(i);
         this.audio.sting('click');
         const v = this.validity[i];
-        if (v && !v.valid) this.toast('⚠ ' + v.reason, 2600);
+        if (v && !v.valid) this.toast(v.reason ?? 'Tidak valid', 2600);
         break;
       }
       case 'garis': {
@@ -697,7 +855,7 @@ export class Game {
     const at = this.orderAnchor(o);
     const sp = this.r.worldToScreen(at.x, at.y);
     fb.style.left = `${Math.max(120, Math.min(this.r.W - 120, sp.x))}px`;
-    fb.style.top = `${Math.max(110, sp.y)}px`;
+    fb.style.top = `${Math.max(150, Math.min(this.r.H - 170, sp.y))}px`;
     fb.classList.remove('hidden');
   }
 
@@ -734,7 +892,7 @@ export class Game {
     if (hit >= 0 && this.tool !== 'bangun' && this.tool !== 'hangus') { this.selectOrder(hit); return; }
     this.selectedOrder = -1;
     const p = this.r.provinceAt(w.x, w.y);
-    if (this.tool === 'bangun' && this.own(p)) { this.selectedProv = p; this.buildMenu(p, sx, sy); this.renderSheet(); return; }
+    if (this.tool === 'bangun' && this.own(p)) { this.selectedProv = p; this.sheetOpen = false; this.renderSheet(); this.buildMenu(p, sx, sy); return; }
     if (this.tool === 'hangus' && this.own(p)) {
       const i = this.myOrders().findIndex((o) => o.kind === 'hangus' && o.prov === p);
       if (i >= 0) this.deleteOrder(i);
@@ -746,7 +904,7 @@ export class Game {
       return;
     }
     this.selectedProv = p;
-    if (p >= 0) { this.tab = 'provinsi'; this.sheetOpen = true; }
+    if (p >= 0) { this.tab = 'provinsi'; this.sheetOpen = this.isWide(); }
     this.renderSheet();
   }
 
@@ -758,16 +916,15 @@ export class Game {
     this.selectedProv = p;
     if (this.own(p)) this.buildMenu(p, sx, sy);
     this.tab = 'provinsi';
-    this.sheetOpen = true;
+    this.sheetOpen = this.isWide();
     this.renderSheet();
   }
 
-  private buildMenu(p: number, sx: number, sy: number) {
+  buildMenu(p: number, sx: number, sy: number) {
     const bm = this.els.buildmenu;
     const s = this.state;
     const k = s.countries[this.current];
     const avail = k.treasury - pendingSpend(s, this.myOrders());
-    const icons: Record<BuildKind, string> = { pabrik: '🏭', pabrikMil: '⚙️', benteng: '🏰', pelabuhan: '⚓', kota: '🏙️', jalan: '🛤️' };
     const kinds: BuildKind[] = ['pabrik', 'pabrikMil', 'benteng', 'pelabuhan', 'kota'];
     bm.replaceChildren(...kinds.map((kind) => {
       const o: Order = { kind: 'bangun', prov: p, what: kind };
@@ -776,11 +933,11 @@ export class Game {
       return h('button', {
         disabled: !v.ok, title: v.reason ?? info.desc,
         onclick: () => { this.addOrder(o); this.hideFloating(); this.toast(`${info.name} diantrekan (${info.turns} giliran).`); },
-      }, h('span', null, icons[kind]), info.name, h('small', null, `${info.cost} · ${info.turns}g`));
+      }, iconEl(kind, 24), info.name, h('small', null, `${info.cost} · ${info.turns}g`));
     }), h('button', {
       disabled: avail < 6 * 10,
       onclick: () => { this.recruit(p, 10000); this.hideFloating(); },
-    }, h('span', null, '🪖'), 'Rekrut 10rb', h('small', null, `${RULES.recruitCostPer1000 * 10} kas`)));
+    }, iconEl('rekrut', 24), 'Rekrut 10rb', h('small', null, `${RULES.recruitCostPer1000 * 10} kas`)));
     bm.style.left = `${Math.max(150, Math.min(this.r.W - 150, sx))}px`;
     bm.style.top = `${Math.max(250, sy)}px`;
     bm.classList.remove('hidden');
@@ -789,7 +946,7 @@ export class Game {
   private recruit(p: number, amount: number) {
     const o: Order = { kind: 'rekrut', prov: p, amount };
     const v = validateOrder(this.map, this.state, this.current, o, this.myOrders());
-    if (!v.ok) { this.toast('⚠ ' + v.reason); return; }
+    if (!v.ok) { this.toast(v.reason ?? 'Tidak valid'); return; }
     const ex = this.myOrders().find((x) => x.kind === 'rekrut' && x.prov === p) as Extract<Order, { kind: 'rekrut' }> | undefined;
     if (ex) { this.pushUndo(); ex.amount += amount; this.afterOrdersChanged(); }
     else this.addOrder(o);
@@ -803,7 +960,8 @@ export class Game {
     const sh = this.els.sheet;
     if (!sh || this.phase !== 'plan') return;
     sh.classList.toggle('collapsed', !this.sheetOpen);
-    this.els.sheetToggle.classList.toggle('hidden', this.sheetOpen);
+    this.els.scrim.classList.toggle('hidden', !this.sheetOpen);
+    this.updateTopbar();
     const s = this.state;
     const inbox = s.proposals.filter((p) => p.to === this.current).length;
     const k = s.countries[this.current];
@@ -814,7 +972,7 @@ export class Game {
     const tabs = h('div', { class: 'tabs' },
       tabBtn('provinsi', 'Provinsi'), tabBtn('negara', 'Negara'), tabBtn('diplomasi', 'Diplomasi', inbox),
       tabBtn('laporan', 'Laporan', (k.pendingEvent ? 1 : 0)),
-      h('button', { class: 'grip', title: 'Buka/tutup', onclick: () => { this.sheetOpen = !this.sheetOpen; this.renderSheet(); } }, this.sheetOpen ? '▾' : '▴'));
+      h('button', { class: 'grip', 'aria-label': 'Tutup', onclick: () => this.closeSheet() }, svg(ICONS.tutup)));
     const body = h('div', { class: 'body' });
     switch (this.tab) {
       case 'provinsi': this.sheetProvince(body); break;
@@ -822,7 +980,40 @@ export class Game {
       case 'diplomasi': this.sheetDiplomacy(body); break;
       case 'laporan': this.sheetReport(body); break;
     }
-    sh.replaceChildren(tabs, body);
+    sh.replaceChildren(h('div', { class: 'handle' }), tabs, body);
+    this.renderPeek();
+  }
+
+  /** Compact card for the selected province: keeps the map visible instead of opening the full panel. */
+  private renderPeek() {
+    const pk = this.els.peek;
+    if (!pk) return;
+    const p = this.selectedProv;
+    if (this.phase !== 'plan' || this.sheetOpen || p < 0) { pk.classList.add('hidden'); return; }
+    const s = this.state;
+    const pr = this.map.provinces[p], ps = s.provs[p];
+    const ctrl = s.countries[ps.ctrl];
+    const mine = ps.ctrl === this.current;
+    const vis = visibleSet(this.map, s, this.current)[p];
+    const cap = stackCap(this.map, s, p);
+    const lvl = mine ? supplyLevels(this.map, s, this.current)[p] : -1;
+    const stat = (label: string, value: string, warn = false) =>
+      h('div', { class: 'pstat' + (warn ? ' warn' : '') }, h('small', null, label), h('b', null, value));
+    pk.replaceChildren(
+      h('div', { class: 'phead' },
+        h('img', { class: 'flag', src: flagDataUrl(ctrl.flag), alt: '' }),
+        h('div', { class: 'ptitle' }, h('b', null, provinceName(this.map.params.seed, p)),
+          h('small', null, `${ctrl.name} · ${TERRAIN_INFO[pr.terrain].name}`)),
+        h('button', { class: 'iconbtn small', 'aria-label': 'Tutup', onclick: () => { this.selectedProv = -1; this.renderPeek(); } }, svg(ICONS.tutup))),
+      h('div', { class: 'pstats' },
+        stat('Pasukan', vis ? fmtCompact(ps.troops) : '?'),
+        stat('Bertahan', `×${(TERRAIN_INFO[pr.terrain].defense * (1 + 0.25 * ps.fort)).toFixed(2)}`),
+        mine ? stat('Kapasitas', `${fmtCompact(ps.troops)}/${fmtCompact(cap)}`, ps.troops > cap) : stat('Populasi', fmtCompact(ps.pop * 1000)),
+        mine ? stat('Suplai', lvl === SUPPLY_FULL ? 'Penuh' : lvl === SUPPLY_CUT ? 'Putus' : 'Tipis', lvl !== SUPPLY_FULL) : stat('Infra', `${ps.infra}/5`)),
+      h('div', { class: 'pact' },
+        mine && ps.owner === this.current ? h('button', { class: 'btn small', onclick: () => this.recruit(p, 10000) }, 'Rekrut +10rb') : null,
+        h('button', { class: 'btn small', onclick: () => { this.tab = 'provinsi'; this.sheetOpen = true; this.renderSheet(); } }, 'Detail ▸')));
+    pk.classList.remove('hidden');
   }
 
   private sheetProvince(body: HTMLElement) {
@@ -928,18 +1119,18 @@ export class Game {
     const n = (p: number) => provinceName(this.map.params.seed, p);
     const s = this.state;
     switch (o.kind) {
-      case 'serang': return `⚔ Serang ${n(o.path[o.path.length - 1])} dari ${n(o.from)} (${o.frac * 100}%)`;
-      case 'gerak': return `➜ Gerak ke ${n(o.path[o.path.length - 1])} (${o.frac * 100}%)`;
-      case 'bertahan': return `🛡 Garis pertahanan ${o.provs.length} provinsi`;
-      case 'udara': return '✈ Misi udara';
-      case 'bangun': return `🏗 ${BUILD_INFO[o.what].name} di ${n(o.prov)}`;
-      case 'rekrut': return `🪖 Rekrut ${fmtCompact(o.amount)} di ${n(o.prov)}`;
-      case 'hangus': return `✖ Bumi hangus ${n(o.prov)}`;
-      case 'deklarasi': return `📜 Deklarasi perang ke ${s.countries[o.target].name}`;
-      case 'usul': return `✉ Usul ${PROPOSAL_NAME[o.what]} ke ${s.countries[o.to].name}`;
-      case 'jawab': return `✉ ${o.accept ? 'Terima' : 'Tolak'} usulan`;
-      case 'mata2': return `🕵 Mata-mata ke ${s.countries[o.target].name}`;
-      case 'event': return '📰 Respons peristiwa';
+      case 'serang': return `Serang ${n(o.path[o.path.length - 1])} dari ${n(o.from)} (${o.frac * 100}%)`;
+      case 'gerak': return `Gerak ke ${n(o.path[o.path.length - 1])} (${o.frac * 100}%)`;
+      case 'bertahan': return `Garis pertahanan ${o.provs.length} provinsi`;
+      case 'udara': return 'Misi udara';
+      case 'bangun': return `${BUILD_INFO[o.what].name} di ${n(o.prov)}`;
+      case 'rekrut': return `Rekrut ${fmtCompact(o.amount)} di ${n(o.prov)}`;
+      case 'hangus': return `Bumi hangus ${n(o.prov)}`;
+      case 'deklarasi': return `Deklarasi perang ke ${s.countries[o.target].name}`;
+      case 'usul': return `Usul ${PROPOSAL_NAME[o.what]} ke ${s.countries[o.to].name}`;
+      case 'jawab': return `${o.accept ? 'Terima' : 'Tolak'} usulan`;
+      case 'mata2': return `Mata-mata ke ${s.countries[o.target].name}`;
+      case 'event': return 'Respons peristiwa';
     }
   }
 
@@ -977,22 +1168,22 @@ export class Game {
         return h('button', { class: 'btn small' + (sent ? ' on' : ''), onclick: () => this.propose(k.id, what) }, label);
       };
       const actions: HTMLElement[] = [];
-      if (r.status === 'perang') actions.push(propose('damai', '🕊 Damai'));
+      if (r.status === 'perang') actions.push(propose('damai', 'Damai'));
       else {
-        actions.push(h('button', { class: 'btn small danger' + (declared ? ' on' : ''), disabled: r.truce > 0, onclick: () => this.declare(k.id) }, declared ? 'Batal deklarasi' : '⚔ Nyatakan perang'));
+        actions.push(h('button', { class: 'btn small danger' + (declared ? ' on' : ''), disabled: r.truce > 0, onclick: () => this.declare(k.id) }, declared ? 'Batal deklarasi' : 'Nyatakan perang'));
         if (r.status !== 'aliansi') actions.push(propose('aliansi', 'Aliansi'));
         if (r.status === 'damai') actions.push(propose('nap', 'Non-agresi'));
         if (!r.trade) actions.push(propose('dagang', 'Dagang'));
       }
       const spied = my.some((o) => o.kind === 'mata2' && o.target === k.id);
-      actions.push(h('button', { class: 'btn small' + (spied ? ' on' : ''), title: `Intel 1 giliran (−${RULES.spyCost})`, onclick: () => this.spy(k.id) }, '🕵'));
+      actions.push(h('button', { class: 'btn small' + (spied ? ' on' : ''), title: `Intel 1 giliran (−${RULES.spyCost})`, onclick: () => this.spy(k.id) }, iconEl('mata2', 18)));
       body.append(h('div', { class: 'cty' },
         h('img', { class: 'flag', src: flagDataUrl(k.flag), alt: '' }),
         h('div', { class: 'nm' }, k.name, h('div', { class: 'muted', style: 'font-size:11px;font-weight:600' }, k.kind === 'manusia' ? 'Manusia' : k.kind === 'ai' ? `AI · ${k.personality}` : `Negara kecil · ${k.personality}`)),
         status, meter, h('div', { class: 'row' }, actions)));
     }
     const intel = s.intel[c];
-    if (intel && intel.turn === s.turn) body.append(h('div', { class: 'news' }, `🕵 Intel: perintah ${s.countries[intel.target].name} giliran lalu tampil samar di peta, dan kekuatannya terlihat.`));
+    if (intel && intel.turn === s.turn) body.append(h('div', { class: 'news' }, `Intel: perintah ${s.countries[intel.target].name} giliran lalu tampil samar di peta, dan kekuatannya terlihat.`));
   }
 
   private toggleOrder(match: (o: Order) => boolean, make: () => Order) {
@@ -1067,8 +1258,9 @@ export class Game {
       h('h2', null, 'Menu'),
       h('div', { class: 'row' },
         h('button', { class: 'btn', onclick: () => { const t = this.state.settings.theme === 'satelit' ? 'kartun' : 'satelit'; this.state.settings.theme = t; this.toast('Membangun tema…'); setTimeout(() => this.r.setTheme(t), 30); bg.remove(); } }, `Tema: ${this.state.settings.theme === 'satelit' ? 'Satelit' : 'Kartun'}`),
-        h('button', { class: 'btn', onclick: () => { this.audio.setMuted(!this.audio.muted); bg.remove(); } }, this.audio.muted ? '🔇 Suara mati' : '🔊 Suara'),
+        h('button', { class: 'btn', onclick: () => { this.audio.setMuted(!this.audio.muted); bg.remove(); } }, iconEl(this.audio.muted ? 'senyap' : 'suara', 18), this.audio.muted ? 'Suara mati' : 'Suara'),
         h('button', { class: 'btn', onclick: () => { this.colorblind = !this.colorblind; bg.remove(); } }, `Pola buta warna: ${this.colorblind ? 'on' : 'off'}`),
+        h('button', { class: 'btn', onclick: () => { this.haptics = !this.haptics; try { localStorage.setItem('garisdepan.haptic', this.haptics ? '1' : '0'); } catch { /* ignore */ } if (this.haptics) this.haptic(20); bg.remove(); } }, iconEl('getar', 18), `Getar: ${this.haptics ? 'on' : 'off'}`),
         h('button', { class: 'btn', onclick: () => { document.body.classList.toggle('lefty'); bg.remove(); } }, 'Mode kidal')),
       h('div', { class: 'row' },
         h('button', { class: 'btn', onclick: () => { bg.remove(); this.help(); } }, 'Cara main'),
@@ -1090,7 +1282,7 @@ export class Game {
         h('p', null, h('b', null, 'Kapasitas: '), 'tiap provinsi hanya sanggup menghidupi sejumlah pasukan (naik dengan jalan/rel dan kota). Kelebihannya hilang 15% per giliran, jadi sebarkan pasukan dan pakai beberapa panah daripada satu tumpukan raksasa.'),
         h('p', null, h('b', null, 'Tirai privasi: '), 'saat HP berpindah tangan, peta tertutup. Tahan tombol 1 detik untuk membuka. Panah lawan tidak pernah ditampilkan.'),
         h('p', null, h('b', null, 'Kontrol PC: '), h('kbd', null, 'klik kiri'), ' gambar · ', h('kbd', null, 'klik kanan tahan'), '/', h('kbd', null, 'WASD'), ' geser · ', h('kbd', null, 'scroll'), ' zoom · ', h('kbd', null, '1–6'), ' alat · ', h('kbd', null, 'Ctrl+Z/Y'), ' batal/ulang · ', h('kbd', null, 'Delete'), ' hapus · ', h('kbd', null, 'Enter'), ' selesai.'),
-        h('p', null, h('b', null, 'HP: '), '1 jari gambar · 2 jari geser/cubit · tekan lama = bangun · geser 3 jari kiri/kanan = batal/ulang.')),
+        h('p', null, h('b', null, 'HP: '), '1 jari selalu menggambar (mulai dari dekat angka pasukanmu, otomatis menempel) · 2 jari geser & cubit · alat ', h('b', null, 'Geser'), ' untuk menggeser dengan 1 jari · tekan lama provinsimu = bangun · geser 3 jari kiri/kanan = batal/ulang.')),
     ]);
   }
 
@@ -1099,7 +1291,7 @@ export class Game {
     this.rec = new Recorder(this.canvas);
     if (this.rec.start()) {
       this.dir.restart(performance.now());
-      this.toast('⏺ Merekam resolusi (9:16)…');
+      this.toast('Merekam resolusi (9:16)…');
     }
     this.updatePlaybar();
   }
@@ -1123,7 +1315,8 @@ export class Game {
       else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') { e.preventDefault(); this.redo(); }
       else if ((e.key === 'Delete' || e.key === 'Backspace') && this.selectedOrder >= 0) this.deleteOrder(this.selectedOrder);
       else if (e.key === 'Enter') this.finishPlan();
-      else if (!e.ctrlKey && /^[1-6]$/.test(e.key)) this.setTool(TOOLS[Number(e.key) - 1][0]);
+      else if (!e.ctrlKey && /^[1-6]$/.test(e.key)) this.setTool(KEY_TOOLS[Number(e.key) - 1]);
+      else if (!e.ctrlKey && e.key.toLowerCase() === 'h') this.setTool('geser');
       else if (e.key === 'Escape') { this.selectedOrder = -1; this.selectedProv = -1; this.hideFloating(); this.renderSheet(); }
     } else if (this.phase === 'resolve') {
       if (e.key === ' ') { e.preventDefault(); this.dir.paused = !this.dir.paused; this.updatePlaybar(); }
@@ -1139,6 +1332,14 @@ export class Game {
     this.lastT = now;
     if (!this.r) return;
     this.input?.tick(dt);
+    if (this.phase !== 'resolve') this.r.stepFlight(now);
+    // adaptive quality: long frames lower resolution and effect density, never the game logic
+    this.frameEma = this.frameEma * 0.94 + dt * 0.06;
+    if (this.frameEma > 28 && now - this.qualityCool > 3500 && this.r.quality > 0 && this.phase !== 'lobby') {
+      this.r.setQuality(this.r.quality - 1);
+      this.qualityCool = now;
+      this.frameEma = 17;
+    }
     // effects run on their own clock; during a replay the director advances it by playback speed
     if (this.phase !== 'resolve') this.r.fx.advance(dt);
     if (this.phase === 'lobby' && this.previewState && now > this.nextAmbient) {
@@ -1190,7 +1391,8 @@ export class Game {
           view.draft = {
             pts: this.draft,
             color: this.tool === 'udara' ? '#9ad7ff' : this.tool === 'bangun' ? '#f0e6c8' : k.color,
-            dashed: this.tool === 'gerak',
+            dashed: this.tool === 'gerak' || this.badStart,
+            bad: this.badStart,
             width: this.tool === 'panah' ? (this.frac === 1 ? 10 : this.frac === 0.5 ? 7 : 4.5) : 6,
             odds: this.tool === 'panah' ? this.draftOdds() : undefined,
           };

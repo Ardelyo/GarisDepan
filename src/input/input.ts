@@ -3,7 +3,7 @@ import type { Renderer } from '../render/renderer';
 
 export interface InputHandlers {
   /** Return true to treat this drag as a drawing stroke (else it pans). */
-  strokeStart(sx: number, sy: number): boolean;
+  strokeStart(sx: number, sy: number, touch: boolean): boolean;
   strokeMove(sx: number, sy: number): void;
   strokeEnd(pts: Pt[]): void;
   strokeCancel(): void;
@@ -11,6 +11,7 @@ export interface InputHandlers {
   longPress(sx: number, sy: number): void;
   wheelDuringStroke(dir: number): void;
   threeFingerSwipe(dir: number): void;
+  doubleTap(sx: number, sy: number): void;
   onCameraMove(): void;
 }
 
@@ -18,11 +19,19 @@ export interface InputHandlers {
 export class Input {
   private pointers = new Map<number, { x: number; y: number; sx: number; sy: number }>();
   private mode: 'none' | 'pending' | 'draw' | 'pan' | 'pinch' = 'none';
+  private touchLike = false;
+  /** Finger jitter tolerance before a touch becomes a drag. */
+  private slop = 6;
   private stroke: Pt[] = [];
   private lpTimer = 0;
   private downT = 0;
   private pinch = { d: 0, cx: 0, cy: 0, zoom: 1, wx: 0, wy: 0 };
   private three: { x: number; t: number } | null = null;
+  /** Recent pan samples (screen px, ms) for fling velocity. */
+  private samples: { x: number; y: number; t: number }[] = [];
+  /** Fling velocity in screen px per ms; decays each frame. */
+  private fling = { vx: 0, vy: 0 };
+  private lastTap = { x: -999, y: -999, t: 0 };
   keys = new Set<string>();
 
   constructor(private el: HTMLCanvasElement, private r: Renderer, private h: InputHandlers) {
@@ -49,6 +58,10 @@ export class Input {
     this.el.setPointerCapture(e.pointerId);
     const p = this.local(e);
     this.pointers.set(e.pointerId, { x: p.x, y: p.y, sx: p.x, sy: p.y });
+    this.touchLike = e.pointerType !== 'mouse';
+    this.fling.vx = this.fling.vy = 0;
+    this.samples = [];
+    this.slop = this.touchLike ? 10 : 6;
     if (this.pointers.size === 1) {
       this.downT = performance.now();
       if (e.pointerType === 'mouse' && (e.button === 2 || e.button === 1)) {
@@ -59,10 +72,8 @@ export class Input {
       this.stroke = [this.r.screenToWorld(p.x, p.y)];
       clearTimeout(this.lpTimer);
       this.lpTimer = window.setTimeout(() => {
-        if (this.mode === 'pending') {
-          this.mode = 'none';
-          this.h.longPress(p.x, p.y);
-        }
+        // long-press opens the context menu but never kills the gesture: dragging afterwards still draws / pans
+        if (this.mode === 'pending') this.h.longPress(p.x, p.y);
       }, 520);
     } else if (this.pointers.size === 2) {
       if (this.mode === 'draw') this.h.strokeCancel();
@@ -92,9 +103,9 @@ export class Input {
     q.x = p.x;
     q.y = p.y;
     if (this.mode === 'pending') {
-      if (Math.hypot(p.x - q.sx, p.y - q.sy) > 7) {
+      if (Math.hypot(p.x - q.sx, p.y - q.sy) > this.slop) {
         clearTimeout(this.lpTimer);
-        if (this.h.strokeStart(q.sx, q.sy)) {
+        if (this.h.strokeStart(q.sx, q.sy, this.touchLike)) {
           this.mode = 'draw';
           this.h.strokeMove(p.x, p.y);
           this.stroke.push(this.r.screenToWorld(p.x, p.y));
@@ -104,6 +115,9 @@ export class Input {
       this.stroke.push(this.r.screenToWorld(p.x, p.y));
       this.h.strokeMove(p.x, p.y);
     } else if (this.mode === 'pan') {
+      const now = performance.now();
+      this.samples.push({ x: p.x, y: p.y, t: now });
+      while (this.samples.length > 2 && now - this.samples[0].t > 90) this.samples.shift();
       this.r.cam.x -= dx / this.r.cam.zoom;
       this.r.cam.y -= dy / this.r.cam.zoom;
       this.r.clampCam();
@@ -132,7 +146,24 @@ export class Input {
       this.three = null;
     }
     if (this.mode === 'pending' && q && this.pointers.size === 0) {
-      if (performance.now() - this.downT < 500) this.h.tap(q.x, q.y);
+      const now = performance.now();
+      if (now - this.downT < 500) {
+        this.h.tap(q.x, q.y);
+        const lt = this.lastTap;
+        if (now - lt.t < 300 && Math.hypot(q.x - lt.x, q.y - lt.y) < 32) { this.h.doubleTap(q.x, q.y); this.lastTap = { x: -999, y: -999, t: 0 }; }
+        else this.lastTap = { x: q.x, y: q.y, t: now };
+      }
+      this.mode = 'none';
+    } else if (this.mode === 'pan' && this.pointers.size === 0) {
+      // glide on release: velocity from the last ~90 ms of the drag
+      const sm = this.samples, now = performance.now();
+      if (this.touchLike && sm.length >= 2 && now - sm[sm.length - 1].t < 60) {
+        const a = sm[0], b = sm[sm.length - 1];
+        const dtm = Math.max(16, b.t - a.t);
+        this.fling.vx = (b.x - a.x) / dtm;
+        this.fling.vy = (b.y - a.y) / dtm;
+        if (Math.hypot(this.fling.vx, this.fling.vy) < 0.15) this.fling.vx = this.fling.vy = 0;
+      }
       this.mode = 'none';
     } else if (this.mode === 'draw' && this.pointers.size === 0) {
       this.h.strokeEnd(this.stroke);
@@ -167,6 +198,16 @@ export class Input {
 
   /** Keyboard panning (WASD / arrows); call each frame. */
   tick(dt: number) {
+    const f = this.fling;
+    if (f.vx || f.vy) {
+      this.r.cam.x -= (f.vx * dt) / this.r.cam.zoom;
+      this.r.cam.y -= (f.vy * dt) / this.r.cam.zoom;
+      const decay = Math.exp(-dt / 320);
+      f.vx *= decay; f.vy *= decay;
+      if (Math.hypot(f.vx, f.vy) < 0.02) f.vx = f.vy = 0;
+      this.r.clampCam();
+      this.h.onCameraMove();
+    }
     const k = this.keys;
     const sp = (600 * dt) / 1000 / this.r.cam.zoom;
     let moved = false;
