@@ -21,6 +21,21 @@ export interface ColView {
   drawn: boolean;
   /** Width of the planned arrow in px (from the order's commitment). */
   width: number;
+  /** Border the army is deploying along (own side a, enemy side b) and how far it has formed a line (0 = column, 1 = line). */
+  lineA: number;
+  lineB: number;
+  lineK: number;
+}
+
+/** A flank guard peeling off a marching army to hold the border toward a threat. */
+export interface DetachView {
+  owner: number;
+  from: Pt;
+  a: number;
+  b: number;
+  troops: number;
+  k: number; // 0..1 travel from the column to its post
+  alpha: number;
 }
 export interface AnnexAnim { prov: number; from: number; to: number; ex: number; ey: number; t0: number; dur: number }
 
@@ -35,6 +50,7 @@ export interface View {
   intel: { orders: Order[]; owner: number } | null;
   draft: { pts: Pt[]; color: string; dashed: boolean; width: number; odds?: number | null } | null;
   cols: ColView[];
+  dets?: DetachView[];
   annex: AnnexAnim[];
   flash: Map<number, number>;
   selectedProv: number;
@@ -208,6 +224,97 @@ export class Renderer {
     c = Int32Array.from(out);
     this.provCells[i] = c;
     return c;
+  }
+
+  private borderCache = new Map<number, Pt[]>();
+  /** The shared border between provinces a and b (longest arc), or the midpoint segment if none. */
+  borderPts(a: number, b: number): Pt[] {
+    const key = Math.min(a, b) * 100000 + Math.max(a, b);
+    let r = this.borderCache.get(key);
+    if (r) return r;
+    const lo = Math.min(a, b), hi = Math.max(a, b);
+    let best: Pt[] | null = null, bl = 0;
+    for (const i of this.map.provArcs[a] ?? []) {
+      const arc = this.map.arcs[i];
+      if (arc.a !== lo || arc.b !== hi) continue;
+      const l = polyLength(arc.pts);
+      if (l > bl) { bl = l; best = arc.pts; }
+    }
+    if (!best) {
+      // across a strait: a short segment between the two, perpendicular to the crossing
+      const A = this.map.provinces[a], B = this.map.provinces[b];
+      const mx = (A.x + B.x) / 2, my = (A.y + B.y) / 2;
+      const dx = B.x - A.x, dy = B.y - A.y, l = Math.hypot(dx, dy) || 1;
+      best = [{ x: mx - (dy / l) * 25, y: my + (dx / l) * 25 }, { x: mx + (dy / l) * 25, y: my - (dx / l) * 25 }];
+    }
+    this.borderCache.set(key, best);
+    return best;
+  }
+
+  /**
+   * The front an army in province a deploys on when facing b: the a|b border extended along
+   * every adjoining stretch of a's border that also faces a hostile province (so the line
+   * hugs the real front instead of one short segment).
+   */
+  frontPts(a: number, b: number, hostile: (p: number) => boolean): Pt[] {
+    const base = this.borderPts(a, b);
+    const arcs = (this.map.provArcs[a] ?? []).map((i) => this.map.arcs[i])
+      .filter((arc) => { const o = arc.a === a ? arc.b : arc.a; return o >= 0 && o !== b && hostile(o); })
+      .map((arc) => arc.pts);
+    let line = base.slice();
+    const near = (p: Pt, q: Pt) => Math.abs(p.x - q.x) < 0.6 && Math.abs(p.y - q.y) < 0.6;
+    const used = new Set<number>();
+    for (let guard = 0; guard < 8; guard++) {
+      let grew = false;
+      arcs.forEach((pts, i) => {
+        if (used.has(i)) return;
+        const h = line[0], t = line[line.length - 1];
+        const s0 = pts[0], s1 = pts[pts.length - 1];
+        if (near(t, s0)) line = line.concat(pts.slice(1));
+        else if (near(t, s1)) line = line.concat(pts.slice(0, -1).reverse());
+        else if (near(h, s1)) line = pts.slice(0, -1).concat(line);
+        else if (near(h, s0)) line = pts.slice(1).reverse().concat(line);
+        else return;
+        used.add(i);
+        grew = true;
+      });
+      if (!grew) break;
+    }
+    return line;
+  }
+
+  /** Screen positions for n chips deployed in ranks along a front polyline, on a's side, centred on the a|b border. */
+  private lineSlots(a: number, b: number, n: number, hostile?: (p: number) => boolean): Pt[] {
+    const pts = hostile ? this.frontPts(a, b, hostile) : this.borderPts(a, b);
+    const A = this.map.provinces[a];
+    const scr = pts.map((p) => this.worldToScreen(p.x, p.y));
+    const L = Math.max(10, polyLength(scr));
+    const ranks = clamp(Math.ceil((n * 8) / (L * 0.95)), 1, 3);
+    const per = Math.ceil(n / ranks);
+    const usable = Math.min(L * 0.95, per * 8.5);
+    const as = this.worldToScreen(A.x, A.y);
+    // centre of the deployment: the middle of the a|b border, located on the front polyline
+    const mid = pointAlong(this.borderPts(a, b), 0.5);
+    const ms = this.worldToScreen(mid.x, mid.y);
+    let uc = 0.5, bd = Infinity;
+    for (let k = 0; k <= 40; k++) {
+      const q = pointAlong(scr, k / 40);
+      const d = Math.hypot(q.x - ms.x, q.y - ms.y);
+      if (d < bd) { bd = d; uc = k / 40; }
+    }
+    const half = usable / L / 2;
+    uc = clamp(uc, half, 1 - half);
+    const out: Pt[] = [];
+    for (let i = 0; i < n; i++) {
+      const r = Math.floor(i / per), j = i % per;
+      const u = uc + ((j + 0.5) / per - 0.5) * (usable / L);
+      const p = pointAlong(scr, u);
+      let nx = -Math.sin(p.a), ny = Math.cos(p.a);
+      if ((as.x - p.x) * nx + (as.y - p.y) * ny < 0) { nx = -nx; ny = -ny; }
+      const off = 6 + r * 7;
+      out.push({ x: p.x + nx * off, y: p.y + ny * off });
+    }
+    return out;
   }
 
   private dotPattern(color: string, dense = false): CanvasPattern {
@@ -517,6 +624,7 @@ export class Renderer {
     ctx.setTransform(dpr, 0, 0, dpr, shake.x * dpr, shake.y * dpr);
     if (v.mode !== 'idle') this.drawFrontFlags(v);
     if (v.mode === 'plan') this.drawCounters(v, now);
+    this.drawDetachments(v);
     this.drawColumns(v, now);
     this.drawCapitals(v);
 
@@ -945,6 +1053,58 @@ export class Renderer {
     ctx.restore();
   }
 
+  /** One unit marker: a square chip (satellite) or a round token (cartoon). */
+  private chip(x: number, y: number, sz: number, color: string, faded: boolean, sat: boolean) {
+    const c = this.ctx;
+    if (sat) {
+      c.fillStyle = faded ? hexA(color, 0.6) : color;
+      c.fillRect(x - sz / 2, y - sz / 2, sz, sz);
+      c.strokeStyle = 'rgba(0,0,0,0.7)';
+      c.lineWidth = 0.8;
+      c.strokeRect(x - sz / 2, y - sz / 2, sz, sz);
+    } else {
+      c.beginPath();
+      c.arc(x, y, sz / 2 + 0.5, 0, Math.PI * 2);
+      c.fillStyle = color;
+      c.fill();
+      c.strokeStyle = '#111';
+      c.lineWidth = 1.1;
+      c.stroke();
+    }
+  }
+
+  /** Flank guards: chips run from the column to the threatened border and line up there. */
+  private drawDetachments(v: View) {
+    const c = this.ctx;
+    const sat = this.theme === 'satelit';
+    for (const d of v.dets ?? []) {
+      const k = v.state.countries[d.owner];
+      if (!k || d.alpha <= 0.01) continue;
+      const n = clamp(Math.round(d.troops / 2500), 2, 6);
+      const slots = this.lineSlots(d.a, d.b, n);
+      const from = this.worldToScreen(d.from.x, d.from.y);
+      const e = d.k * d.k * (3 - 2 * d.k);
+      c.globalAlpha = d.alpha;
+      let cx = 0, cy = 0;
+      slots.forEach((sl) => {
+        const x = from.x + (sl.x - from.x) * e, y = from.y + (sl.y - from.y) * e;
+        cx += x; cy += y;
+        this.chip(x, y, sat ? 4.5 : 5, k.color, false, sat);
+      });
+      cx /= n; cy /= n;
+      if (d.k > 0.6) {
+        c.font = `800 10px ${COUNTER_FONT}`;
+        c.textAlign = 'center';
+        c.lineWidth = 3;
+        c.strokeStyle = 'rgba(0,0,0,0.85)';
+        c.strokeText('+' + fmtCompact(d.troops), cx, cy - 9);
+        c.fillStyle = '#fff';
+        c.fillText('+' + fmtCompact(d.troops), cx, cy - 9);
+      }
+      c.globalAlpha = 1;
+    }
+  }
+
   /** Columns: the remaining arrow (used up as the army advances), a formation block and one unit card. */
   private drawColumns(v: View, now: number) {
     const c = this.ctx;
@@ -956,7 +1116,8 @@ export class Renderer {
     c.setTransform(this.dpr * z, 0, 0, this.dpr * z, this.dpr * (this.W / 2 - this.cam.x * z), this.dpr * (this.H / 2 - this.cam.y * z));
     for (const col of v.cols) {
       const k = s.countries[col.owner];
-      if (!k || col.kind === 'mundur' || col.alpha <= 0.01 || col.u >= 0.97) continue;
+      // attacks and the player's own lines only; internal AI reshuffles would clutter the map
+      if (!k || col.kind === 'mundur' || (col.kind === 'gerak' && !col.drawn) || col.alpha <= 0.01 || col.u >= 0.97) continue;
       const L = polyLength(col.route);
       const ahead = subPath(col.route, col.u, 1, Math.max(6, Math.round(L / 8)));
       this.drawArrow(ahead, k.color, col.width, { dashed: col.kind === 'gerak', alpha: 0.6 * col.alpha });
@@ -976,6 +1137,7 @@ export class Renderer {
     for (const col of v.cols) {
       const k = s.countries[col.owner];
       if (!k || col.alpha <= 0.01) continue;
+      const kc = k.color;
       const head = pointAlong(col.route, Math.min(1, Math.max(0, col.u)));
       const back = pointAlong(col.route, Math.max(0, col.u - 0.04));
       let ang = Math.atan2(head.y - back.y, head.x - back.x);
@@ -984,38 +1146,34 @@ export class Renderer {
       const rows = clamp(Math.ceil(col.troops / 7000), 1, 5);
       const per = clamp(Math.ceil(col.troops / 2500 / rows), 2, 4);
       const gap = 7, sz = sat ? 5 : 5.5;
-      c.globalAlpha = col.alpha;
-      c.save();
-      c.translate(hs.x, hs.y);
-      c.rotate(ang);
+      // column block slots (rotated behind the head)
+      const ca = Math.cos(ang), sa = Math.sin(ang);
+      const slots: Pt[] = [];
       for (let r = 0; r < rows; r++)
         for (let q = 0; q < per; q++) {
-          let x = -r * gap, y = (q - (per - 1) / 2) * gap;
-          if (col.fighting) { x += Math.sin(now / 45 + r * 3 + q) * 1.6; y += Math.cos(now / 38 + q * 2) * 1.2; }
-          if (sat) {
-            c.fillStyle = col.kind === 'mundur' ? hexA(k.color, 0.6) : k.color;
-            c.fillRect(x - sz / 2, y - sz / 2, sz, sz);
-            c.strokeStyle = 'rgba(0,0,0,0.7)';
-            c.lineWidth = 0.8;
-            c.strokeRect(x - sz / 2, y - sz / 2, sz, sz);
-          } else {
-            c.beginPath();
-            c.arc(x, y, sz / 2 + 0.5, 0, Math.PI * 2);
-            c.fillStyle = k.color;
-            c.fill();
-            c.strokeStyle = '#111';
-            c.lineWidth = 1.1;
-            c.stroke();
-          }
+          const lx = -r * gap, ly = (q - (per - 1) / 2) * gap;
+          slots.push({ x: hs.x + lx * ca - ly * sa, y: hs.y + lx * sa + ly * ca });
         }
-      c.restore();
+      // deploying: morph into a line that follows the border shape
+      const kl = col.lineK > 0 && col.lineB >= 0 ? col.lineK * col.lineK * (3 - 2 * col.lineK) : 0;
+      const line = kl > 0 ? this.lineSlots(col.lineA, col.lineB, slots.length, (p) => v.ctrl[p] !== col.owner && atWar(s, col.owner, v.ctrl[p])) : null;
+      c.globalAlpha = col.alpha;
+      let cx = 0, cy = 0;
+      slots.forEach((sl, i) => {
+        let x = sl.x, y = sl.y;
+        if (line) { x += (line[i].x - x) * kl; y += (line[i].y - y) * kl; }
+        if (col.fighting) { x += Math.sin(now / 45 + i * 3) * 1.4; y += Math.cos(now / 38 + i * 2) * 1.1; }
+        cx += x; cy += y;
+        this.chip(x, y, sz, kc, col.kind === 'mundur', sat);
+      });
+      cx /= slots.length; cy /= slots.length;
       // unit card: white box, flag, bold caps, one strength figure (as in the reference)
       if (col.troops >= 1500 && col.kind !== 'mundur') {
         const name = (k.name.length <= 12 ? k.name : k.name.split(' ').pop() ?? k.name).toUpperCase();
         const txt = fmtCompact(col.troops);
         c.font = `800 10px ${COUNTER_FONT}`;
         const w = Math.max(c.measureText(name).width, c.measureText(txt).width) + 26;
-        const bx = hs.x + 10, by = hs.y - 34;
+        const bx = cx + 12, by = cy - 36;
         c.fillStyle = 'rgba(0,0,0,0.35)';
         c.fillRect(bx + 1.5, by + 1.5, w, 24);
         c.fillStyle = '#f4f4f0';
@@ -1031,7 +1189,7 @@ export class Renderer {
         c.strokeStyle = 'rgba(0,0,0,0.5)';
         c.lineWidth = 0.8;
         c.beginPath();
-        c.moveTo(hs.x + 3, hs.y - 3);
+        c.moveTo(cx + 3, cy - 3);
         c.lineTo(bx, by + 24);
         c.stroke();
       }

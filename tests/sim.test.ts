@@ -165,3 +165,30 @@ describe('manoeuvre rules (putaran 2)', () => {
     }
   });
 });
+
+describe('smart units', () => {
+  it('a marching army leaves a flank guard when it passes an enemy on its side', () => {
+    const map = generateMap({ seed: 5, shape: 'benua', size: 'sedang' });
+    const s = newGame(map, [{ name: 'A', kind: 'ai', color: 0 }, { name: 'B', kind: 'ai', color: 1 }], 0, { ...settings, fog: false });
+    const P = map.provinces;
+    // own province that borders the enemy, reached through another own province
+    for (let cur = 0; cur < P.length; cur++) {
+      if (s.provs[cur].ctrl !== 0) continue;
+      const enemy = P[cur].neighbors.find((n) => s.provs[n].ctrl === 1);
+      const back = P[cur].neighbors.find((n) => s.provs[n].ctrl === 0 && !P[n].neighbors.some((m) => s.provs[m].ctrl === 1));
+      const fwd = P[cur].neighbors.find((n) => s.provs[n].ctrl === 0 && n !== back);
+      if (enemy === undefined || back === undefined || fwd === undefined) continue;
+      s.provs[back].troops = 40000;
+      s.provs[enemy].troops = 30000;
+      const before = s.provs[cur].troops;
+      const r = resolveTurn(map, s, [[{ kind: 'gerak', from: back, path: [back, cur, fwd], frac: 1 }], []]);
+      const det = r.res.frames.flatMap((f) => f.events).find((e) => e.t === 'detach');
+      expect(det).toBeTruthy();
+      if (det && det.t === 'detach') {
+        expect(det.prov).toBe(cur);
+        expect(r.state.provs[cur].troops).toBeGreaterThan(before);
+      }
+      return;
+    }
+  });
+});

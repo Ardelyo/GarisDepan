@@ -1168,6 +1168,7 @@ export class Game {
       view.troops = f.troops;
       view.ctrl = f.ctrl;
       view.cols = f.cols;
+      view.dets = f.dets;
       view.annex = f.annex;
       view.flash = f.flash;
       view.spotlight = f.spotlight;

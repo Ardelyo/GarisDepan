@@ -17,7 +17,9 @@ export const RULES = {
   absorbMin: 1200, // garrisons at or below this fall to an adjacent advancing army
   absorbShare: 0.12, // …or below this share of the adjacent attacking strength
   absorbPerDay: 3, // per country, keeps collapses readable
-  marchSpeed: 1.0, // provinces per day on open ground
+  marchSpeed: 1.0,
+  flankThreat: 0.25, // enemy strength on a flank (share of the column) that makes it leave a guard
+  flankShare: 0.3, // at most this share of the column stays behind as the guard // provinces per day on open ground
   garrisonFill: 0.6, // automatic reinforcement fills garrisons only to this share of capacity
   amphibPenalty: 0.6,
   pincerBonus: 1.2,

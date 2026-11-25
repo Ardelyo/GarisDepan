@@ -292,6 +292,7 @@ export function resolveTurn(map: GameMap, input: GameState, orders: Order[][]): 
     c.troops * s.countries[c.owner].quality * morale(c.owner) * supplyCombat(supplied[c.owner][c.path[c.idx]]) *
     (c.amphib[c.idx] ? RULES.amphibPenalty : 1) * (airCovers(c.owner, q) ? RULES.airBonus : 1) * pincer;
   const capturedToday = new Set<number>();
+  const guarded = new Set<string>();
 
   const merge = (col: Col, prov: number) => {
     if (col.gone) return;
@@ -407,6 +408,33 @@ export function resolveTurn(map: GameMap, input: GameState, orders: Order[][]): 
   for (let day = 1; day <= RULES.daysPerTurn; day++) {
     const ev: SimEvent[] = [];
     capturedToday.clear();
+    // a0. flank awareness: a marching army that passes an enemy on its side leaves a guard there
+    for (const col of cols) {
+      if (col.gone || col.fighting || col.kind === 'mundur' || col.troops < 6000) continue;
+      const nxt = col.path[col.idx + 1];
+      const cur = col.prog >= 0.5 && nxt !== undefined && s.provs[nxt].ctrl === col.owner ? nxt : col.path[col.idx];
+      if (s.provs[cur].ctrl !== col.owner || guarded.has(col.id + ':' + cur)) continue;
+      let threat = 0, toward = -1, worst = 0;
+      for (const n of P[cur].neighbors) {
+        if (col.path.includes(n) || !atWar(s, col.owner, s.provs[n].ctrl)) continue;
+        let t = s.provs[n].troops;
+        for (const e of cols) if (!e.gone && e.kind !== 'mundur' && e.path[e.idx] === n && e.path[e.idx + 1] === cur) t += e.troops;
+        threat += t;
+        if (t > worst) { worst = t; toward = n; }
+      }
+      // enemy columns already coming straight at this province from anywhere
+      for (const e of cols) if (!e.gone && e.kind !== 'mundur' && atWar(s, col.owner, e.owner) && e.path[e.idx + 1] === cur && !P[cur].neighbors.includes(e.path[e.idx])) threat += e.troops;
+      if (toward < 0 || threat < Math.max(3000, RULES.flankThreat * col.troops)) continue;
+      const amt = Math.round(Math.min(col.troops * RULES.flankShare, threat * 0.6) / 100) * 100;
+      if (amt < 1000) continue;
+      guarded.add(col.id + ':' + cur);
+      col.troops -= amt;
+      col.init = Math.max(col.troops, col.init - amt);
+      s.provs[cur].troops += amt;
+      s.provs[cur].entrenched = true;
+      ev.push({ t: 'detach', owner: col.owner, col: col.id, prov: cur, toward, troops: amt, at: 0.05 + 0.35 * rng.next() });
+    }
+
     // a. movement
     for (const col of cols) {
       if (col.gone || col.fighting) continue;

@@ -1,12 +1,13 @@
 import { clamp, easeInOut, lerp, type Pt } from '../core/geom';
 import type { GameMap } from '../map/types';
 import type { ColSnap, GameState, Resolution, SimEvent } from '../sim/types';
-import type { AnnexAnim, ColView, Renderer } from './renderer';
+import type { AnnexAnim, ColView, DetachView, Renderer } from './renderer';
 
 export interface DirectorFrame {
   troops: number[];
   ctrl: number[];
   cols: ColView[];
+  dets: DetachView[];
   annex: AnnexAnim[];
   flash: Map<number, number>;
   spotlight: { x: number; y: number; t0: number } | null;
@@ -48,6 +49,7 @@ export class Director {
   private theatre: { x0: number; y0: number; x1: number; y1: number } | null = null;
   private camAnim: { from: { x: number; y: number; zoom: number }; to: { x: number; y: number; zoom: number }; t0: number; dur: number } | null = null;
   private routes = new Map<string, { route: Pt[]; nodes: number[]; drawn: boolean }>();
+  private dets: { owner: number; from: Pt; a: number; b: number; troops: number; t0: number }[] = [];
 
   onMoment?: (text: string, color: string, kind: string) => void;
   onDay?: (day: number) => void;
@@ -97,6 +99,7 @@ export class Director {
     this.annex = [];
     this.flash.clear();
     this.capturedAt.clear();
+    this.dets = [];
     this.battles = [];
     this.spotlight = null;
     this.camAnim = null;
@@ -255,7 +258,21 @@ export class Director {
       if (cb.gone) alpha = 1 - clamp((f - 0.6) / 0.4, 0, 1);
       else if (!ca) alpha = Math.min(1, f * 4);
       const tr = lerp(ca?.troops ?? cb.troops, cb.troops, f);
+      // formation: column while marching, line along the border when closing in / fighting,
+      // then back to column once through
+      const a = cb.path[cb.idx], b = cb.path[cb.idx + 1];
+      const prog = ca && samePath && ca.idx === cb.idx ? lerp(ca.prog, cb.prog, f) : cb.prog;
+      let lineK = 0;
+      if (b !== undefined && cb.kind !== 'mundur') {
+        const enemyAhead = ctrl[b] !== cb.owner;
+        if (cb.fighting) lineK = ca?.fighting ? 1 : Math.min(1, 0.35 + f * 2);
+        else if (enemyAhead && prog >= 0.15 && prog <= 0.5) lineK = (prog - 0.15) / 0.35;
+        else if (!enemyAhead && A.ctrl[b] !== cb.owner && prog > 0.45 && prog < 0.85) lineK = 1 - (prog - 0.45) / 0.4;
+      }
       cols.push({
+        lineA: a,
+        lineB: b ?? -1,
+        lineK: clamp(lineK, 0, 1),
         owner: cb.owner,
         route: r.route,
         u: lerp(ua, ub, f),
@@ -268,8 +285,14 @@ export class Director {
       });
     }
     this.annex = this.annex.filter((a) => this.r.fx.time < a.t0 + a.dur + 900);
+    const vt = this.r.fx.time;
+    const dets: DetachView[] = this.dets.map((d) => ({
+      owner: d.owner, from: d.from, a: d.a, b: d.b, troops: d.troops,
+      k: clamp((vt - d.t0) / 1400, 0, 1),
+      alpha: this.t >= this.total - 600 ? clamp((this.total - this.t) / 600, 0, 1) : 1,
+    }));
     return {
-      troops, ctrl, cols, annex: this.annex, flash: this.flash, spotlight: this.spotlight,
+      troops, ctrl, cols, dets, annex: this.annex, flash: this.flash, spotlight: this.spotlight,
       day: Math.min(nDays, Math.floor(tt)), done: this.t >= this.total,
     };
   }
@@ -328,6 +351,26 @@ export class Director {
         for (let i = 0; i < 4; i++) fx.plane(k.color, { x: cap.x + i * 14, y: cap.y - i * 9 }, { x: ev.x, y: ev.y }, ev.r * (0.5 + i * 0.15), i * 400, this.dayDur * 6);
         for (let i = 0; i < 8; i++) this.missileInto(ev.owner, ev.x + (Math.random() - 0.5) * ev.r, ev.y + (Math.random() - 0.5) * ev.r, 12, 1500 + i * this.dayDur * 0.7);
         this.onSound?.('plane', 1);
+        break;
+      }
+      case 'detach': {
+        // the guard leaves from wherever its column is right now
+        const P2 = this.map.provinces;
+        let from: Pt = { x: P2[ev.prov].x, y: P2[ev.prov].y };
+        const col = this.res.frames[sc.day]?.cols.find((c) => c.id === ev.col);
+        if (col) {
+          const r = this.routeOf(col);
+          const i = Math.min(col.idx, r.nodes.length - 1);
+          const u = r.nodes[i];
+          let L = 0, acc = 0;
+          for (let j = 1; j < r.route.length; j++) L += Math.hypot(r.route[j].x - r.route[j - 1].x, r.route[j].y - r.route[j - 1].y);
+          for (let j = 1; j < r.route.length; j++) {
+            const seg = Math.hypot(r.route[j].x - r.route[j - 1].x, r.route[j].y - r.route[j - 1].y);
+            if (acc + seg >= u * L) { const t = seg ? (u * L - acc) / seg : 0; from = { x: lerp(r.route[j - 1].x, r.route[j].x, t), y: lerp(r.route[j - 1].y, r.route[j].y, t) }; break; }
+            acc += seg;
+          }
+        }
+        this.dets.push({ owner: ev.owner, from, a: ev.prov, b: ev.toward, troops: ev.troops, t0: this.r.fx.time });
         break;
       }
       case 'amphib': {

@@ -174,7 +174,9 @@ export type SimEvent =
   | { t: 'capture'; prov: number; from: number; to: number; ex: number; ey: number; at: number; how: 'serbu' | 'lindas' | 'serap' }
   | { t: 'moment'; text: string; country: number; x: number; y: number; kind: 'dikepung' | 'ibukota' | 'gagal' | 'terobosan' | 'perang' | 'damai' }
   | { t: 'air'; owner: number; x: number; y: number; r: number }
-  | { t: 'amphib'; owner: number; from: number; to: number };
+  | { t: 'amphib'; owner: number; from: number; to: number }
+  /** A marching army peels off a flank guard: `troops` stay in `prov`, facing the threat in `toward`. */
+  | { t: 'detach'; owner: number; col: number; prov: number; toward: number; troops: number; at: number };
 
 export interface TickFrame {
   day: number;
