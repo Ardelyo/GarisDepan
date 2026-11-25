@@ -1,7 +1,7 @@
 import type { Rng } from '../core/rng';
 import type { GameMap } from '../map/types';
 import type { GameState } from './types';
-import { countryProvs } from './rules';
+import { RULES, countryProvs } from './rules';
 
 interface EventDef {
   id: string;
@@ -44,7 +44,7 @@ export const EVENTS: EventDef[] = [
     cond: (_m, s, c) => s.countries[c].budget.res >= 25,
     weight: 1,
     choices: [
-      { label: 'Militer (+5% kualitas peralatan)', apply: (s, c) => { s.countries[c].quality += 0.05; return 'Peralatan baru dikirim ke garis depan.'; } },
+      { label: 'Militer (+5% kualitas peralatan)', apply: (s, c) => { const k = s.countries[c]; if (k.quality >= RULES.qualityCap) return 'Peralatan sudah di batas teknologi saat ini.'; k.quality = Math.min(RULES.qualityCap, Math.round((k.quality + 0.05) * 100) / 100); return 'Peralatan baru dikirim ke garis depan.'; } },
       { label: 'Industri (+1 pabrik di ibu kota)', apply: (s, c) => { const k = s.countries[c]; if (k.capital >= 0) s.provs[k.capital].factories++; return 'Pabrik baru mulai berproduksi.'; } },
     ],
   },

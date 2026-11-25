@@ -12,8 +12,8 @@ import { boundingCircle, pointInPoly, recognize } from './input/stroke';
 import { Audio } from './audio/audio';
 import { newGame, dateOf, fmtDate } from './sim/setup';
 import {
-  BUILD_INFO, PROPOSAL_NAME, RULES, atWar, allied, countryGdp, findPath, manpowerCap, pendingSpend,
-  totalTroops, validateOrder, visibleSet,
+  BUILD_INFO, PROPOSAL_NAME, RULES, SUPPLY_CUT, SUPPLY_FULL, atWar, allied, attackOdds, countryGdp, findPath,
+  manpowerCap, pendingSpend, stackCap, supplyLevels, totalTroops, validateOrder, visibleSet,
 } from './sim/rules';
 import { planAI } from './sim/ai';
 import { resolveTurn, fmtInt, scoreOf } from './sim/sim';
@@ -559,7 +559,8 @@ export class Game {
     const list = this.myOrders() ?? [];
     this.validity = list.map((o, i) => {
       const v = validateOrder(this.map, this.state, this.current, o, list.slice(0, i).concat(list.filter((x) => x.kind === 'deklarasi')));
-      return { order: o, valid: v.ok, reason: v.reason };
+      const odds = o.kind === 'serang' && v.ok ? attackOdds(this.map, this.state, this.current, o, list)?.ratio : undefined;
+      return { order: o, valid: v.ok, reason: v.reason, odds };
     });
   }
 
@@ -845,7 +846,19 @@ export class Game {
         h('div', null, h('small', null, 'Infrastruktur'), h('b', null, `${ps.infra}/5`)),
         h('div', null, h('small', null, 'Pabrik'), h('b', null, `${ps.factories} + ${ps.milFactories} mil`)),
         h('div', null, h('small', null, 'Pelabuhan'), h('b', null, ps.port ? 'Ada' : '—')),
-        h('div', null, h('small', null, 'Integrasi'), h('b', null, Math.round(ps.integration * 100) + '%'))),
+        h('div', null, h('small', null, 'Integrasi'), h('b', null, Math.round(ps.integration * 100) + '%')),
+        ...(mine ? (() => {
+          const cap = stackCap(this.map, s, p);
+          const lvl = supplyLevels(this.map, s, this.current)[p];
+          const over = ps.troops > cap;
+          return [
+            h('div', { title: 'Pasukan di atas kapasitas berkurang 15% dari kelebihannya tiap giliran. Naik dengan jalan/rel dan kota.' },
+              h('small', null, 'Kapasitas'), h('b', { style: over ? 'color:#ff6b5e' : '' }, `${fmtCompact(ps.troops)} / ${fmtCompact(cap)}`)),
+            h('div', { title: 'Jarak dari ibu kota/kota lewat wilayahmu. Jalan/rel memperpanjang jangkauan.' },
+              h('small', null, 'Suplai'), h('b', { style: lvl === SUPPLY_FULL ? '' : lvl === SUPPLY_CUT ? 'color:#ff6b5e' : 'color:#f5b800' },
+                lvl === SUPPLY_FULL ? 'Penuh' : lvl === SUPPLY_CUT ? 'Terputus' : 'Menipis')),
+          ];
+        })() : [])),
       ps.queue.length ? h('div', { class: 'muted' }, 'Antrean: ' + ps.queue.map((q) => `${BUILD_INFO[q.kind].name} (${q.left}g)`).join(', ')) : '',
     );
     if (mine && ps.owner === this.current) {
@@ -1069,7 +1082,9 @@ export class Game {
         h('p', null, h('b', null, 'Lingkari '), 'wilayah musuh dengan alat Serang untuk operasi jepit otomatis — serangan dari ≥2 arah dapat bonus +20%.'),
         h('p', null, h('b', null, 'Garis '), 'di sepanjang perbatasan meratakan pasukan dan menggali parit (+25% bertahan). ', h('b', null, 'Udara '), 'melingkari area untuk dukungan udara.'),
         h('p', null, h('b', null, 'WEGO: '), 'semua pemain merencanakan diam-diam bergantian, lalu semua perintah dieksekusi bersamaan selama 7 hari sebagai animasi. Dua serangan yang bertemu jadi pertempuran berjalan.'),
-        h('p', null, h('b', null, 'Logistik: '), 'pasukan yang terputus dari ibu kota/kota melemah 10% per minggu. Gunung & benteng membuat penyerang butuh rasio ±3:1.'),
+        h('p', null, h('b', null, 'Rasio kekuatan: '), 'saat menggambar panah serang, label di ujung panah menunjukkan perkiraan kekuatanmu dibanding pembela: ', h('b', { style: 'color:#1f9d55' }, 'hijau'), ' = kemungkinan tembus, ', h('b', { style: 'color:#d99a00' }, 'kuning'), ' = alot, ', h('b', { style: 'color:#d64236' }, 'merah'), ' = kemungkinan gagal. Gabungkan beberapa panah ke satu target untuk menaikkan rasio.'),
+        h('p', null, h('b', null, 'Logistik: '), 'suplai mengalir dari ibu kota & kota lewat wilayahmu; jalan/rel memperpanjang jangkauannya. Di ujung jalur suplai pasukan melemah 4%/minggu (tempur −18%); terputus total −10%/minggu. Gunung & benteng membuat penyerang butuh rasio ±3:1.'),
+        h('p', null, h('b', null, 'Kapasitas: '), 'tiap provinsi hanya sanggup menghidupi sejumlah pasukan (naik dengan jalan/rel dan kota). Kelebihannya hilang 15% per giliran, jadi sebarkan pasukan dan pakai beberapa panah daripada satu tumpukan raksasa.'),
         h('p', null, h('b', null, 'Tirai privasi: '), 'saat HP berpindah tangan, peta tertutup. Tahan tombol 1 detik untuk membuka. Panah lawan tidak pernah ditampilkan.'),
         h('p', null, h('b', null, 'Kontrol PC: '), h('kbd', null, 'klik kiri'), ' gambar · ', h('kbd', null, 'klik kanan tahan'), '/', h('kbd', null, 'WASD'), ' geser · ', h('kbd', null, 'scroll'), ' zoom · ', h('kbd', null, '1–6'), ' alat · ', h('kbd', null, 'Ctrl+Z/Y'), ' batal/ulang · ', h('kbd', null, 'Delete'), ' hapus · ', h('kbd', null, 'Enter'), ' selesai.'),
         h('p', null, h('b', null, 'HP: '), '1 jari gambar · 2 jari geser/cubit · tekan lama = bangun · geser 3 jari kiri/kanan = batal/ulang.')),
@@ -1167,6 +1182,7 @@ export class Game {
             color: this.tool === 'udara' ? '#9ad7ff' : this.tool === 'bangun' ? '#f0e6c8' : k.color,
             dashed: this.tool === 'gerak',
             width: this.tool === 'panah' ? (this.frac === 1 ? 10 : this.frac === 0.5 ? 7 : 4.5) : 6,
+            odds: this.tool === 'panah' ? this.draftOdds() : undefined,
           };
         }
         this.updateTimer(now);
@@ -1185,6 +1201,24 @@ export class Game {
       this.canvas.classList.add('blur');
     } else this.canvas.classList.remove('blur');
   };
+
+  private oddsCache: { key: string; odds: number | null | undefined } | null = null;
+
+  /** Live strength estimate while an attack arrow is being drawn. */
+  private draftOdds(): number | null | undefined {
+    const d = this.draft;
+    if (!d || d.length < 2) return undefined;
+    const from = this.r.provinceAt(d[0].x, d[0].y);
+    const end = d[d.length - 1];
+    const to = this.r.provinceAt(end.x, end.y);
+    if (!this.own(from) || to < 0 || to === from || allied(this.state, this.current, this.state.provs[to].ctrl)) return undefined;
+    const key = `${from}>${to}@${this.frac}#${this.myOrders().length}`;
+    if (this.oddsCache?.key === key) return this.oddsCache.odds;
+    const path = findPath(this.map, this.state, this.current, from, to, { attack: true, stroke: d }) ?? [from, to];
+    const odds = attackOdds(this.map, this.state, this.current, { from, path, frac: this.frac }, this.myOrders())?.ratio;
+    this.oddsCache = { key, odds };
+    return odds;
+  }
 
   private baseView(s: GameState, viewer: number): View {
     return {

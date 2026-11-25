@@ -48,12 +48,14 @@ Goresan dihaluskan (Douglas–Peucker, lalu Catmull–Rom), dikenali sebagai gar
 **Simulasi dunia** (deterministik, terpisah dari render)
 - 7 hari per giliran, dihitung per hari. Kolom pasukan bergerak mengikuti medan & infrastruktur. Dua serangan yang bertemu menjadi *meeting engagement*.
 - Pertempuran memakai hukum kuadrat Lanchester yang disederhanakan, dengan pengubah medan (gunung ×1,5), benteng, kota, ibu kota, parit, suplai, moral, dukungan udara, dan penalti amfibi. Penyerang butuh ±1,5:1 di dataran dan ±3:1 di gunung/benteng.
-- **Logistik**: provinsi yang terputus dari ibu kota/kota tidak mendapat suplai, sehingga −10%/minggu dan lemah dalam tempur. Pasukan yang terkepung tanpa jalur mundur dihancurkan (DIKEPUNG!).
-- **Ekonomi**: PDB = populasi × pabrik × infrastruktur × integrasi × stabilitas. Separuh pajak dibelanjakan otomatis lewat slider Militer/Sipil/Riset, separuh lagi masuk kas untuk bangun/rekrut. Ada batas mobilisasi 2,5% populasi, riset menaikkan kualitas peralatan, dan wilayah pendudukan baru produktif setelah integrasi.
+- **Logistik**: suplai mengalir dari ibu kota/kota lewat wilayah sendiri; jalan/rel memperpanjang jangkauannya. Di ujung jalur suplai pasukan −4%/minggu dan tempur −18%; terputus total −10%/minggu dan tempur −35%. Pasukan yang terkepung tanpa jalur mundur dihancurkan (DIKEPUNG!).
+- **Kapasitas provinsi**: tiap provinsi hanya sanggup menghidupi sejumlah pasukan (naik dengan jalan/rel dan kota); kelebihannya hilang 15%/giliran. Penguatan otomatis hanya masuk ke provinsi yang masih punya ruang.
+- **Rasio kekuatan**: saat menggambar panah serang, label di ujung panah menunjukkan perkiraan rasio penyerang:pembela (hijau ≥2:1, kuning ≥1,3:1, merah di bawahnya, abu-abu jika tertutup kabut). Beberapa panah ke target yang sama dijumlahkan, termasuk bonus jepit.
+- **Ekonomi**: PDB = populasi × pabrik × infrastruktur × integrasi × stabilitas. Separuh pajak dibelanjakan otomatis lewat slider Militer/Sipil/Riset, separuh lagi masuk kas untuk bangun/rekrut. Ada batas mobilisasi 2,5% populasi, riset menaikkan kualitas peralatan (maksimal 150%), dan wilayah pendudukan baru produktif setelah integrasi.
 - **Politik**: stabilitas, kelelahan perang, demokrasi/otoriter, kudeta, event acak berbasis kondisi dengan pilihan (krisis pangan, demo, skandal, bencana, terobosan riset, relawan).
 - **Diplomasi**: deklarasi perang, damai (garis depan saat itu menjadi perbatasan), aliansi pertahanan (sekutu ikut perang), pakta non-agresi, dagang, dan reputasi untuk pengkhianatan. Ada kotak masuk rahasia antarpemain manusia, mata-mata yang membuka intel lawan selama satu giliran, gencatan senjata 8 giliran, dan pemerintahan pengasingan.
 - **AI**: utility AI per negara (kepribadian netral/oportunis/agresif/pasifis) yang menghasilkan perintah dalam format yang sama dengan pemain.
-- Kondisi menang: Dominasi (60% populasi dunia atau semua ibu kota lawan), Ekonomi (40% PDB selama 12 giliran), Skor saat batas giliran, atau kekuatan besar terakhir yang tersisa.
+- Kondisi menang: Dominasi (porsi populasi dunia yang menyesuaikan jumlah kekuatan besar: 60% untuk 2, ±42% untuk 4, ±34% untuk 8; atau semua ibu kota lawan), Ekonomi (40% PDB selama 12 giliran), Skor saat batas giliran, atau kekuatan besar terakhir yang tersisa.
 
 **Tontonan**
 - Dua tema dengan satu sistem animasi: **Satelit** (gelap, perbatasan bercahaya, stipple di tepi depan, lampu kota) dan **Kartun** (flat cerah, garis depan hitam bergaya spidol, unit bulat).

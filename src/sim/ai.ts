@@ -1,7 +1,7 @@
 import { Rng } from '../core/rng';
 import type { GameMap } from '../map/types';
 import {
-  BUILD_INFO, RULES, allied, atWar, defenseMultiplier, findPath, manpowerCap, totalTroops,
+  BUILD_INFO, RULES, allied, atWar, defenseMultiplier, findPath, manpowerCap, stackCap, totalTroops,
 } from './rules';
 import type { Frac, GameState, Order, Proposal } from './types';
 
@@ -98,6 +98,10 @@ export function planAI(map: GameMap, s: GameState, c: number): Order[] {
   const avail = new Map<number, number>();
   for (const i of mine) avail.set(i, s.provs[i].troops);
   const threat = (i: number) => enemyAdj(i).reduce((a, n) => a + s.provs[n].troops, 0) / Math.max(1, s.provs[i].troops);
+  // projected garrison after this turn's moves, to respect stacking limits
+  const projected = new Map<number, number>();
+  for (const i of mine) projected.set(i, s.provs[i].troops);
+  const room = (i: number) => stackCap(map, s, i) - (projected.get(i) ?? 0);
 
   // attacks: enemy provinces bordering us, weakest first
   const targets = new Set<number>();
@@ -114,13 +118,14 @@ export function planAI(map: GameMap, s: GameState, c: number): Order[] {
     let pot = 0;
     for (const n of srcs) pot += (avail.get(n) ?? 0) * 0.75;
     pot *= me.quality * skill;
-    const need = t.deff * (me.personality === 'agresif' ? 1.5 : 1.8);
+    const need = t.deff * (me.personality === 'agresif' ? 1.15 : 1.35);
     if (pot < need) continue;
     for (const n of srcs) {
       const frac: Frac = threat(n) > 0.8 ? 0.5 : 1;
       const keep = frac === 1 ? 0 : 0.5;
       orders.push({ kind: 'serang', from: n, path: [n, t.q], frac, group });
       avail.set(n, (avail.get(n) ?? 0) * keep);
+      projected.set(n, (projected.get(n) ?? 0) * keep);
     }
     group++;
   }
@@ -131,14 +136,21 @@ export function planAI(map: GameMap, s: GameState, c: number): Order[] {
     for (const i of mine) {
       if (front.includes(i) || (avail.get(i) ?? 0) < 2000) continue;
       if (i === me.capital && enemies.length === 0) continue;
-      const dest = ranked.reduce((best, f) => {
+      const frac: Frac = i === me.capital ? 0.5 : (avail.get(i) ?? 0) > 2 * Math.max(2000, room(ranked[0])) ? 0.5 : 1;
+      const amt = (avail.get(i) ?? 0) * frac;
+      let dest = -1, bd = Infinity;
+      for (const f of ranked) {
+        if (room(f) < Math.min(amt, 4000)) continue;
         const d = Math.hypot(P[f].x - P[i].x, P[f].y - P[i].y) / (1 + threat(f));
-        return d < best.d ? { f, d } : best;
-      }, { f: ranked[0], d: Infinity }).f;
+        if (d < bd) { bd = d; dest = f; }
+      }
+      if (dest < 0) continue;
       const path = findPath(map, s, c, i, dest, { attack: false });
       if (path && path.length >= 2) {
-        orders.push({ kind: 'gerak', from: i, path, frac: i === me.capital ? 0.5 : 1 });
-        avail.set(i, 0);
+        orders.push({ kind: 'gerak', from: i, path, frac });
+        avail.set(i, (avail.get(i) ?? 0) - amt);
+        projected.set(i, (projected.get(i) ?? 0) - amt);
+        projected.set(dest, (projected.get(dest) ?? 0) + amt);
       }
     }
   } else if (enemies.length === 0) {
@@ -148,8 +160,13 @@ export function planAI(map: GameMap, s: GameState, c: number): Order[] {
       if (border.includes(i) || i === me.capital || s.provs[i].troops < 5000 || !border.length) continue;
       if (!rng.chance(0.3)) continue;
       const dest = border[Math.floor(rng.next() * border.length)];
+      const amt = s.provs[i].troops * 0.5;
+      if (room(dest) < amt) continue;
       const path = findPath(map, s, c, i, dest, { attack: false });
-      if (path) orders.push({ kind: 'gerak', from: i, path, frac: 0.5 });
+      if (path) {
+        orders.push({ kind: 'gerak', from: i, path, frac: 0.5 });
+        projected.set(dest, (projected.get(dest) ?? 0) + amt);
+      }
     }
   }
 
@@ -161,9 +178,11 @@ export function planAI(map: GameMap, s: GameState, c: number): Order[] {
     const ranked = front.slice().sort((a, b) => threat(b) - threat(a));
     for (const f of ranked.slice(0, 3)) {
       if (s.provs[f].owner !== c) continue;
-      const amount = Math.min(30000, Math.floor((money * 0.5) / RULES.recruitCostPer1000) * 1000, Math.floor((cap - troops) / 1000) * 1000);
-      if (amount < 5000) break;
+      const amount = Math.min(30000, Math.floor((money * 0.5) / RULES.recruitCostPer1000) * 1000, Math.floor((cap - troops) / 1000) * 1000,
+        Math.floor(room(f) / 1000) * 1000);
+      if (amount < 5000) continue;
       orders.push({ kind: 'rekrut', prov: f, amount });
+      projected.set(f, (projected.get(f) ?? 0) + amount);
       money -= (amount / 1000) * RULES.recruitCostPer1000;
       troops += amount;
     }

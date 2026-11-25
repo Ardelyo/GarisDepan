@@ -8,7 +8,7 @@ import type { BuildKind, GameState, Order, ProposalKind } from './types';
 export const RULES = {
   daysPerTurn: 7,
   lanchesterK: 0.09,
-  breakRatio: 2.0,
+  breakRatio: 1.7,
   attackerGiveUp: 0.65,
   amphibPenalty: 0.6,
   pincerBonus: 1.2,
@@ -24,6 +24,17 @@ export const RULES = {
   integrationPerTurn: 0.15,
   airCost: 40,
   spyCost: 60,
+  // ---- stacking: how many troops a province can feed ----
+  stackBase: 14000,
+  stackPerInfra: 6000,
+  stackPerUrban: 18000,
+  overStackLoss: 0.15, // share of the excess lost per turn
+  // ---- supply range (in route-cost units from a depot) ----
+  supplyRange: 3.2,
+  stretchedCombat: 0.82,
+  stretchedAttrition: 0.04,
+  // ---- research ----
+  qualityCap: 1.5,
 };
 
 export const BUILD_INFO: Record<BuildKind, { name: string; cost: number; turns: number; desc: string }> = {
@@ -78,23 +89,66 @@ export function countryGdp(s: GameState, c: number): number {
   return g;
 }
 
-/** Provinces connected (through own/allied control) to the capital or a port city = supplied. */
-export function suppliedSet(map: GameMap, s: GameState, c: number): Uint8Array {
+/** Max troops a province can sustain; above this the excess wastes away. */
+export function stackCap(map: GameMap, s: GameState, i: number): number {
+  const p = s.provs[i];
+  const terr = Math.max(0.6, Math.min(1, TERRAIN_INFO[map.provinces[i].terrain].speed));
+  return Math.round((RULES.stackBase + RULES.stackPerInfra * p.infra + RULES.stackPerUrban * p.urban) * terr);
+}
+
+export const SUPPLY_CUT = 0, SUPPLY_STRETCHED = 1, SUPPLY_FULL = 2;
+
+/**
+ * Supply level per province for country c. Depots are the capital and own cities;
+ * supply flows through own/allied land (and by sea from ports), and each step costs
+ * less on good roads. Within `supplyRange` = full, up to twice that = stretched,
+ * further or disconnected = cut.
+ */
+export function supplyLevels(map: GameMap, s: GameState, c: number): Uint8Array {
   const n = s.provs.length;
-  const sup = new Uint8Array(n);
-  const q: number[] = [];
+  const dist = new Float64Array(n).fill(Infinity);
+  const done = new Uint8Array(n);
   const country = s.countries[c];
-  const sources: number[] = [];
-  if (country.capital >= 0 && s.provs[country.capital].ctrl === c) sources.push(country.capital);
-  s.provs.forEach((p, i) => { if (p.ctrl === c && p.owner === c && p.urban > 0) sources.push(i); });
-  for (const src of sources) if (!sup[src]) { sup[src] = 1; q.push(src); }
-  while (q.length) {
-    const i = q.pop()!;
+  if (country.capital >= 0 && s.provs[country.capital].ctrl === c) dist[country.capital] = 0;
+  s.provs.forEach((p, i) => { if (p.ctrl === c && p.owner === c && p.urban > 0) dist[i] = 0; });
+  const step = (b: number) => {
+    const pb = s.provs[b];
+    let k = 1 / (1 + 0.3 * pb.infra);
+    if (pb.owner !== c) k *= 1.5; // occupied land: no depots, hostile population
+    return k;
+  };
+  for (;;) {
+    let i = -1, bd = Infinity;
+    for (let j = 0; j < n; j++) if (!done[j] && dist[j] < bd) { bd = dist[j]; i = j; }
+    if (i < 0) break;
+    done[i] = 1;
     const pr = map.provinces[i];
-    for (const nb of pr.neighbors) if (!sup[nb] && allied(s, c, s.provs[nb].ctrl)) { sup[nb] = 1; q.push(nb); }
-    if (s.provs[i].port) for (const nb of pr.seaLinks) if (!sup[nb] && s.provs[nb].ctrl === c) { sup[nb] = 1; q.push(nb); }
+    for (const nb of pr.neighbors) {
+      if (done[nb] || !allied(s, c, s.provs[nb].ctrl)) continue;
+      const d = bd + step(nb);
+      if (d < dist[nb]) dist[nb] = d;
+    }
+    if (s.provs[i].port) for (const nb of pr.seaLinks) {
+      if (done[nb] || s.provs[nb].ctrl !== c) continue;
+      const d = bd + 1.5 * step(nb);
+      if (d < dist[nb]) dist[nb] = d;
+    }
   }
-  return sup;
+  const out = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    out[i] = dist[i] <= RULES.supplyRange ? SUPPLY_FULL : dist[i] <= RULES.supplyRange * 2 ? SUPPLY_STRETCHED : SUPPLY_CUT;
+  }
+  return out;
+}
+
+/** Combat multiplier for a supply level. */
+export function supplyCombat(level: number): number {
+  return level === SUPPLY_FULL ? 1 : level === SUPPLY_STRETCHED ? RULES.stretchedCombat : RULES.unsuppliedCombat;
+}
+
+/** Provinces with any supply (not cut off). */
+export function suppliedSet(map: GameMap, s: GameState, c: number): Uint8Array {
+  return supplyLevels(map, s, c).map((l) => (l > SUPPLY_CUT ? 1 : 0));
 }
 
 /** Which provinces can country c see troop counts for (own, allied, adjacent, intel). */
@@ -281,6 +335,39 @@ export function pendingSpend(_s: GameState, orders: Order[]): number {
 export const PROPOSAL_NAME: Record<ProposalKind, string> = {
   damai: 'Perjanjian damai', aliansi: 'Aliansi', nap: 'Pakta non-agresi', dagang: 'Perjanjian dagang',
 };
+
+/**
+ * Planning-time estimate of attacker:defender strength for an attack order, including
+ * other attacks this player has planned on the same target (pincer bonus too).
+ * Returns null when the target's troops are hidden by fog of war.
+ */
+export function attackOdds(
+  map: GameMap, s: GameState, c: number, o: { from: number; path: number[]; frac: number }, pending: Order[] = [],
+): { target: number; ratio: number | null } | null {
+  const target = o.path.find((p, i) => i > 0 && !allied(s, c, s.provs[p].ctrl));
+  if (target === undefined) return null;
+  if (!visibleSet(map, s, c)[target]) return { target, ratio: null };
+  const sup = supplyLevels(map, s, c);
+  const me = s.countries[c];
+  const atk = [o, ...pending.filter((x): x is Extract<Order, { kind: 'serang' }> =>
+    x.kind === 'serang' && x !== o && x.path.find((p, i) => i > 0 && !allied(s, c, s.provs[p].ctrl)) === target)];
+  const seen = new Set<number>();
+  let a = 0;
+  const froms = new Set<number>();
+  for (const x of atk) {
+    if (seen.has(x.from) && x !== o) continue;
+    seen.add(x.from);
+    const last = x.path[x.path.indexOf(target) - 1] ?? x.from;
+    froms.add(last);
+    const amphib = isSeaStep(map, last, target) ? RULES.amphibPenalty : 1;
+    a += s.provs[x.from].troops * x.frac * supplyCombat(sup[x.from]) * amphib;
+  }
+  a *= me.quality * (froms.size >= 2 ? RULES.pincerBonus : 1);
+  const tp = s.provs[target];
+  const def = s.countries[tp.ctrl];
+  const d = Math.max(1, tp.troops) * (def?.quality ?? 1) * defenseMultiplier(map, s, target);
+  return { target, ratio: a / d };
+}
 
 /** Rough military strength near a border, used by AI and UI hints. */
 export function localStrength(map: GameMap, s: GameState, c: number, around: number): number {
