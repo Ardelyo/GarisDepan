@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#05080e" />
+  <meta name="description" content="GARIS DEPAN — game strategi peta: gambar perintah langsung di peta, giliran simultan, hot-seat 2–8 pemain." />
+  <title>Garis Depan</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;700;800&family=Inter:wght@400;600;700&display=swap" rel="stylesheet" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%2305080e'/%3E%3Cpath d='M10 44 L30 20 L38 30 L54 14' stroke='%23e3342f' stroke-width='7' fill='none' stroke-linecap='round'/%3E%3Cpath d='M54 14 l-12 2 l10 10z' fill='%23e3342f'/%3E%3C/svg%3E" />
+</head>
+<body>
+  <div id="app">
+    <canvas id="map"></canvas>
+    <svg width="0" height="0" style="position:absolute">
+      <filter id="mblur"><feGaussianBlur id="mblurStd" stdDeviation="0 0" /></filter>
+    </svg>
+    <div id="ui"></div>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
