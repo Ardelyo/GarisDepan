@@ -254,61 +254,58 @@ export class Renderer {
     });
   }
 
-  draw(v: View, now: number) {
+  private layer: HTMLCanvasElement | null = null;
+  private layerKey = '';
+
+  /**
+   * Static map layers (terrain, political fill, borders, front lines, fog) are
+   * cached in an offscreen canvas and rebuilt only when something changes.
+   */
+  private ensureLayer(v: View, now: number, z: number, S: number, annexFrom: Map<number, number>) {
+    const s = v.state;
+    let occ = '';
+    for (let i = 0; i < s.provs.length; i++) {
+      const ps = s.provs[i];
+      occ += annexFrom.has(i) ? '0' : v.ctrl[i] !== ps.owner || (ps.integration < 1 && v.ctrl[i] === ps.ctrl) ? '1' : '0';
+    }
+    let vis = '';
+    if (v.visible) for (let i = 0; i < v.visible.length; i++) vis += v.visible[i];
+    const urban = s.provs.map((p) => p.urban).join('');
+    // provinces mid-annexation still show their previous owner → no rebuild until the wipe ends
+    const eff = v.ctrl.map((c, i) => annexFrom.get(i) ?? c);
+    const key = [this.theme, S, Math.round(Math.log2(z) * 3), eff.join(','), occ, vis, urban, v.colorblind,
+      s.rel.map((r) => r.map((x) => x.status[0]).join('')).join('')].join('|');
+    if (key === this.layerKey && this.layer) return;
+    this.layerKey = key;
+    const W = Math.round(this.map.w * S), H = Math.round(this.map.h * S);
+    if (!this.layer || this.layer.width !== W || this.layer.height !== H) {
+      this.layer = document.createElement('canvas');
+      this.layer.width = W;
+      this.layer.height = H;
+    }
+    const lctx = this.layer.getContext('2d')!;
+    lctx.setTransform(S, 0, 0, S, 0, 0);
+    lctx.clearRect(0, 0, this.map.w, this.map.h);
+    const base = this.bases.get(this.theme)!;
+    lctx.imageSmoothingEnabled = true;
+    lctx.drawImage(base.canvas, 0, 0, this.map.w, this.map.h);
+    const main = this.ctx;
+    this.ctx = lctx;
+    try { this.drawLayers(v, now, z, annexFrom); } finally { this.ctx = main; }
+  }
+
+  private drawLayers(v: View, _now: number, z: number, annexFrom: Map<number, number>) {
     const { ctx, map } = this;
-    const z = this.cam.zoom;
-    const dpr = this.dpr;
     const sat = this.theme === 'satelit';
     const s = v.state;
-    const shake = this.fx.shake(now);
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.fillStyle = sat ? '#060c16' : '#3a98e6';
-    ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
-    const tx = dpr * (this.W / 2 - this.cam.x * z + shake.x);
-    const ty = dpr * (this.H / 2 - this.cam.y * z + shake.y);
-    ctx.setTransform(dpr * z, 0, 0, dpr * z, tx, ty);
-    const base = this.bases.get(this.theme)!;
-    ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(base.canvas, 0, 0, map.w, map.h);
-    if (base.grain && z > 1.2) {
-      ctx.fillStyle = base.grain;
-      ctx.fillRect(0, 0, map.w, map.h);
-    }
-    if (v.mode === 'curtain') return;
-
-    this.rebuildBorders(s, v.ctrl);
     const P = map.provinces;
     const fillA = sat ? 0.4 : 0.3;
-    const annexOf = new Map<number, AnnexAnim>();
-    for (const a of v.annex) annexOf.set(a.prov, a);
-
     // ---- political fill ----
     for (let i = 0; i < P.length; i++) {
-      const c = v.ctrl[i];
+      const from = annexFrom.get(i);
+      const c = from ?? v.ctrl[i];
       const k = s.countries[c];
       if (!k) continue;
-      const an = annexOf.get(i);
-      if (an && now < an.t0 + an.dur) {
-        const kf = s.countries[an.from];
-        if (kf) { ctx.fillStyle = hexA(kf.color, fillA); ctx.fill(this.provPath[i]); }
-        if (now > an.t0) {
-          const t = (now - an.t0) / an.dur;
-          const bb = P[i].bbox;
-          const maxR = Math.hypot(Math.max(an.ex - bb.x0, bb.x1 - an.ex), Math.max(an.ey - bb.y0, bb.y1 - an.ey));
-          const r = maxR * (1 - Math.pow(1 - t, 2.2));
-          ctx.save();
-          ctx.clip(this.provPath[i]);
-          ctx.beginPath();
-          ctx.arc(an.ex, an.ey, r, 0, Math.PI * 2);
-          ctx.fillStyle = hexA(k.color, fillA + 0.1);
-          ctx.fill();
-          ctx.strokeStyle = hexA(sat ? '#ffffff' : k.color, 0.8 * (1 - t));
-          ctx.lineWidth = 6 / z;
-          ctx.stroke();
-          ctx.restore();
-        }
-        continue;
-      }
       ctx.fillStyle = hexA(k.color, fillA);
       ctx.fill(this.provPath[i]);
       if (v.colorblind) {
@@ -316,21 +313,12 @@ export class Renderer {
         ctx.fill(this.provPath[i]);
       }
       const ps = s.provs[i];
-      if (c !== ps.owner || (ps.integration < 1 && c === ps.ctrl)) {
+      if (from === undefined && (c !== ps.owner || (ps.integration < 1 && c === ps.ctrl))) {
         // occupied / being integrated: stipple like an advancing zone
         ctx.fillStyle = this.dotPattern(hexA(k.color, sat ? 0.95 : 0.8), true);
         ctx.fill(this.provPath[i]);
       }
     }
-    // annex border pulse
-    for (const an of v.annex) {
-      const t = (now - an.t0 - an.dur) / 500;
-      if (t < 0 || t > 1) continue;
-      ctx.strokeStyle = sat ? `rgba(255,255,255,${1 - t})` : `rgba(0,0,0,${0.8 * (1 - t)})`;
-      ctx.lineWidth = (3 + 4 * t) / z;
-      ctx.stroke(this.provPath[an.prov]);
-    }
-
     // ---- borders ----
     ctx.lineJoin = 'round';
     ctx.lineCap = 'round';
@@ -354,12 +342,10 @@ export class Renderer {
       ctx.stroke(this.nationalPath);
       ctx.setLineDash([]);
     }
-
     // ---- front lines ----
     for (const ai of this.frontArcs) {
       const arc = map.arcs[ai];
       if (sat) {
-        // stippled advancing edge on both sides
         for (const side of [arc.a, arc.b]) {
           const k = s.countries[v.ctrl[side]];
           if (!k) continue;
@@ -382,20 +368,90 @@ export class Renderer {
         this.strokePts(this.wobbly[ai]);
       }
     }
-
-    // ---- cities & capitals ----
-    for (let i = 0; i < P.length; i++) {
+    // ---- city lights ----
+    if (sat) for (let i = 0; i < P.length; i++) {
       const ps = s.provs[i];
-      if (ps.urban > 0 && sat) {
-        const r = (5 + ps.urban * 4) / Math.sqrt(z);
-        const g = ctx.createRadialGradient(P[i].x, P[i].y, 0, P[i].x, P[i].y, r);
-        g.addColorStop(0, 'rgba(255,225,160,0.55)');
-        g.addColorStop(1, 'rgba(255,200,120,0)');
-        ctx.fillStyle = g;
-        ctx.beginPath();
-        ctx.arc(P[i].x, P[i].y, r, 0, Math.PI * 2);
-        ctx.fill();
-      }
+      if (ps.urban <= 0) continue;
+      const r = (5 + ps.urban * 4) / Math.sqrt(z);
+      const g = ctx.createRadialGradient(P[i].x, P[i].y, 0, P[i].x, P[i].y, r);
+      g.addColorStop(0, 'rgba(255,225,160,0.55)');
+      g.addColorStop(1, 'rgba(255,200,120,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(P[i].x, P[i].y, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // ---- fog of war ----
+    if (v.visible) {
+      ctx.fillStyle = sat ? 'rgba(0,0,0,0.42)' : 'rgba(255,255,255,0.32)';
+      for (let i = 0; i < P.length; i++) if (!v.visible[i]) ctx.fill(this.provPath[i]);
+      ctx.fillStyle = this.hatchPattern(0, sat ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.07)');
+      for (let i = 0; i < P.length; i++) if (!v.visible[i]) ctx.fill(this.provPath[i]);
+    }
+  }
+
+  draw(v: View, now: number) {
+    const { ctx, map } = this;
+    const z = this.cam.zoom;
+    const dpr = this.dpr;
+    const sat = this.theme === 'satelit';
+    const s = v.state;
+    const shake = this.fx.shake(now);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = sat ? '#060c16' : '#3a98e6';
+    ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+    const tx = dpr * (this.W / 2 - this.cam.x * z + shake.x);
+    const ty = dpr * (this.H / 2 - this.cam.y * z + shake.y);
+    ctx.setTransform(dpr * z, 0, 0, dpr * z, tx, ty);
+    const base = this.bases.get(this.theme)!;
+    ctx.imageSmoothingEnabled = true;
+    if (v.mode === 'curtain') {
+      ctx.drawImage(base.canvas, 0, 0, map.w, map.h);
+      return;
+    }
+    this.rebuildBorders(s, v.ctrl);
+    const P = map.provinces;
+    const fillA = sat ? 0.4 : 0.3;
+    const annexFrom = new Map<number, number>();
+    for (const a of v.annex) if (now < a.t0 + a.dur) annexFrom.set(a.prov, a.from);
+    const px = z * dpr;
+    if (px <= 1.7) {
+      const S = px <= 0.8 ? 0.8 : px <= 1.15 ? 1.15 : 1.7;
+      this.ensureLayer(v, now, z, S, annexFrom);
+      ctx.drawImage(this.layer!, 0, 0, map.w, map.h);
+    } else {
+      // zoomed in: draw vectors directly for crispness
+      ctx.drawImage(base.canvas, 0, 0, map.w, map.h);
+      if (base.grain) { ctx.fillStyle = base.grain; ctx.fillRect(0, 0, map.w, map.h); }
+      this.drawLayers(v, now, z, annexFrom);
+    }
+
+    // ---- annexation wipes (radial flow from the entry point) ----
+    for (const an of v.annex) {
+      const i = an.prov;
+      const k = s.countries[an.to];
+      if (!k || now < an.t0 || now > an.t0 + an.dur) continue;
+      const t = (now - an.t0) / an.dur;
+      const bb = P[i].bbox;
+      const maxR = Math.hypot(Math.max(an.ex - bb.x0, bb.x1 - an.ex), Math.max(an.ey - bb.y0, bb.y1 - an.ey));
+      const r = maxR * (1 - Math.pow(1 - t, 2.2));
+      ctx.save();
+      ctx.clip(this.provPath[i]);
+      ctx.beginPath();
+      ctx.arc(an.ex, an.ey, r, 0, Math.PI * 2);
+      ctx.fillStyle = hexA(k.color, fillA + 0.15);
+      ctx.fill();
+      ctx.strokeStyle = hexA(sat ? '#ffffff' : k.color, 0.85 * (1 - t));
+      ctx.lineWidth = 6 / z;
+      ctx.stroke();
+      ctx.restore();
+    }
+    for (const an of v.annex) {
+      const t = (now - an.t0 - an.dur) / 500;
+      if (t < 0 || t > 1) continue;
+      ctx.strokeStyle = sat ? `rgba(255,255,255,${1 - t})` : `rgba(0,0,0,${0.8 * (1 - t)})`;
+      ctx.lineWidth = (3 + 4 * t) / z;
+      ctx.stroke(this.provPath[an.prov]);
     }
 
     // ---- country labels ----
@@ -417,14 +473,6 @@ export class Renderer {
     }
     (ctx as CanvasRenderingContext2D & { letterSpacing?: string }).letterSpacing = '0px';
     ctx.restore();
-
-    // ---- fog of war ----
-    if (v.visible) {
-      ctx.fillStyle = sat ? 'rgba(0,0,0,0.42)' : 'rgba(255,255,255,0.32)';
-      for (let i = 0; i < P.length; i++) if (!v.visible[i]) ctx.fill(this.provPath[i]);
-      ctx.fillStyle = this.hatchPattern(0, sat ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.07)');
-      for (let i = 0; i < P.length; i++) if (!v.visible[i]) ctx.fill(this.provPath[i]);
-    }
 
     // ---- selection ----
     if (v.selectedProv >= 0) {
