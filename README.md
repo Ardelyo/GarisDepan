@@ -46,8 +46,9 @@ Butuh Node 20+. Hasil build berupa web statis biasa, sehingga bisa dibungkus Cap
 Goresan dihaluskan (Douglas–Peucker, lalu Catmull–Rom), dikenali sebagai garis atau lingkaran, dan di-*snap* ke provinsi. Perintah tidak valid tampil merah putus-putus beserta alasannya. Undo/redo tersedia lewat tombol, Ctrl+Z/Y, atau geser tiga jari.
 
 **Simulasi dunia** (deterministik, terpisah dari render)
-- 7 hari per giliran, dihitung per hari. Kolom pasukan bergerak mengikuti medan & infrastruktur. Dua serangan yang bertemu menjadi *meeting engagement*.
-- Pertempuran memakai hukum kuadrat Lanchester yang disederhanakan, dengan pengubah medan (gunung ×1,5), benteng, kota, ibu kota, parit, suplai, moral, dukungan udara, dan penalti amfibi. Penyerang butuh ±1,5:1 di dataran dan ±3:1 di gunung/benteng.
+- 7 hari per giliran, dihitung per hari. Kolom pasukan bergerak ±1 provinsi/hari mengikuti medan & infrastruktur. Dua serangan yang bertemu menjadi *meeting engagement*.
+- **Manuver**: kolom yang jauh lebih kuat (±4:1) *melindas* garnisun lemah tanpa berhenti; wilayah musuh yang kosong atau lemah di sebelah pasukan yang sedang maju ikut *terserap*, dan kantong yang terkepung runtuh. Garnisun awal tipis di pedalaman, penuh di ibu kota & kota.
+- Pertempuran memakai hukum kuadrat Lanchester yang disederhanakan, dengan pengubah medan (gunung ×1,5), benteng, kota, ibu kota, parit, suplai, moral, dukungan udara, dan penalti amfibi. Terobosan pada rasio efektif 1,3:1; penyerang dapat inisiatif +20% di dua hari pertama dan pertahanan tanpa parit/benteng −8%, jadi dataran bisa direbut dengan kekuatan setara, sementara hutan, bukit, gunung, kota, dan garis pertahanan butuh konsentrasi atau jepitan.
 - **Logistik**: suplai mengalir dari ibu kota/kota lewat wilayah sendiri; jalan/rel memperpanjang jangkauannya. Di ujung jalur suplai pasukan −4%/minggu dan tempur −18%; terputus total −10%/minggu dan tempur −35%. Pasukan yang terkepung tanpa jalur mundur dihancurkan (DIKEPUNG!).
 - **Kapasitas provinsi**: tiap provinsi hanya sanggup menghidupi sejumlah pasukan (naik dengan jalan/rel dan kota); kelebihannya hilang 15%/giliran. Penguatan otomatis hanya masuk ke provinsi yang masih punya ruang.
 - **Rasio kekuatan**: saat menggambar panah serang, label di ujung panah menunjukkan perkiraan rasio penyerang:pembela (hijau ≥2:1, kuning ≥1,3:1, merah di bawahnya, abu-abu jika tertutup kabut). Beberapa panah ke target yang sama dijumlahkan, termasuk bonus jepit.
@@ -59,8 +60,10 @@ Goresan dihaluskan (Douglas–Peucker, lalu Catmull–Rom), dikenali sebagai gar
 
 **Tontonan**
 - Dua tema dengan satu sistem animasi: **Satelit** (gelap, perbatasan bercahaya, stipple di tepi depan, lampu kota) dan **Kartun** (flat cerah, garis depan hitam bergaya spidol, unit bulat).
-- Aliran aneksasi radial dari titik masuk, barisan bendera yang maju dan berguncang saat kontak, counter yang berdetak/berkedip merah, ledakan dengan bloom, cincin asap & guncangan kamera, pesawat dengan jejak, kapal pendarat, cap tanggal per hari, teks momen (DIKEPUNG!, IBU KOTA JATUH, SERANGAN GAGAL, PERANG!, DAMAI).
-- **Kamera sutradara** menyorot pertempuran terbesar dengan sapuan + motion blur terarah dan spotlight. Bisa jeda, 1×/2×/4×, putar ulang, dan lewati.
+- **Resolusi progresif** (meniru video referensi): ±4,5 detik per hari, peristiwa tersebar di dalam hari. Wilayah yang direbut tumbuh **sel demi sel** dari titik masuk: titik-titik tipis di depan, tepi terang, isi di belakangnya.
+- **Panah pemain dipakai**: pasukan berbaris tepat di sepanjang garis yang digambar, dan panah "termakan" dari ekor seiring pasukan maju. Tiap pasukan tampil sebagai blok formasi dengan satu kartu unit (bendera, nama, kekuatan).
+- Ledakan lima tahap ±5,5 detik (gelombang kejut, bola api, puncak kecokelatan, asap hitam, hanyut), kabut asap yang menetap, rudal berjejak terang, cincin reticle di sasaran, urutan pendaratan amfibi, pesawat patroli & konvoi kapal yang selalu bergerak.
+- Kamera **terkunci** pada teater giliran itu dengan push-in pelan; **kamera sutradara** (sorot pertempuran terbesar dengan sapuan + motion blur) bisa dinyalakan. Jeda, 1×/2×/4×, putar ulang, lewati.
 - **Rekam Resolusi** mengekspor giliran sebagai video vertikal 9:16 (WebM) dengan cap tanggal & korban.
 - Audio sintetis WebAudio (artileri, coretan spidol, pesawat, drone ambien yang naik saat pertempuran). Tanpa file aset.
 

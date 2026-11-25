@@ -60,6 +60,7 @@ export class Game {
   validity: DrawnOrder[] = [];
   previewState: GameState | null = null;
   private lastT = performance.now();
+  private nextAmbient = 0;
   private lastCam = { x: 0, y: 0 };
   private ui: HTMLElement;
   private canvas: HTMLCanvasElement;
@@ -253,7 +254,7 @@ export class Game {
     const d = dateOf(this.prevState);
     d.setUTCDate(d.getUTCDate() + Math.min(6, day));
     st.replaceChildren(fmtDate(d), h('small', null, `GILIRAN ${this.prevState.turn} · HARI ${Math.min(7, day + 1)}/7`));
-    if (flip) { st.classList.remove('flip'); void st.offsetWidth; st.classList.add('flip'); }
+    if (flip) { st.classList.remove('flip'); void st.offsetWidth; st.classList.add('flip'); st.classList.toggle('ital'); }
   }
 
   toast(msg: string, ms = 1800) {
@@ -619,7 +620,9 @@ export class Game {
         const path = findPath(this.map, s, c, sp, ep, { attack: true, stroke: rec.pts })
           ?? (attack ? null : findPath(this.map, s, c, sp, ep, { attack: false, stroke: rec.pts }));
         if (!path) { this.toast('Tidak ada rute ke sana.'); return; }
-        const o: Order = { kind: attack ? 'serang' : 'gerak', from: sp, path, frac: this.frac };
+        // keep the player's own line: the army will march along exactly what was drawn
+        const stroke = simplify(rec.pts, 3 / this.r.cam.zoom).slice(0, 48).map((q) => ({ x: Math.round(q.x * 10) / 10, y: Math.round(q.y * 10) / 10 }));
+        const o: Order = { kind: attack ? 'serang' : 'gerak', from: sp, path, frac: this.frac, stroke };
         const i = this.addOrder(o);
         this.selectOrder(i);
         this.audio.sting('click');
@@ -701,7 +704,7 @@ export class Game {
   private orderAnchor(o: Order): Pt {
     const P = this.map.provinces;
     switch (o.kind) {
-      case 'serang': case 'gerak': return pointAlong(this.r.route(o.path), 1);
+      case 'serang': case 'gerak': return pointAlong(this.r.orderLine(o), 1);
       case 'bertahan': return o.stroke?.[Math.floor(o.stroke.length / 2)] ?? P[o.provs[0]];
       case 'udara': return { x: o.x, y: o.y };
       case 'bangun': case 'rekrut': case 'hangus': return P[o.prov];
@@ -715,7 +718,7 @@ export class Game {
     let best = -1, bd = 14 / z;
     list.forEach((o, i) => {
       let d = Infinity;
-      if (o.kind === 'serang' || o.kind === 'gerak') d = distToPolyline(w, this.r.route(o.path));
+      if (o.kind === 'serang' || o.kind === 'gerak') d = distToPolyline(w, this.r.orderLine(o));
       else if (o.kind === 'bertahan' && o.stroke) d = distToPolyline(w, o.stroke);
       else if (o.kind === 'udara') d = Math.abs(Math.hypot(w.x - o.x, w.y - o.y) - o.r);
       if (d < bd) { bd = d; best = i; }
@@ -1136,6 +1139,12 @@ export class Game {
     this.lastT = now;
     if (!this.r) return;
     this.input?.tick(dt);
+    // effects run on their own clock; during a replay the director advances it by playback speed
+    if (this.phase !== 'resolve') this.r.fx.advance(dt);
+    if (this.phase === 'lobby' && this.previewState && now > this.nextAmbient) {
+      this.dir.ambient(this.previewState);
+      this.nextAmbient = now + 1400;
+    }
     let view: View | null = null;
 
     if (this.phase === 'lobby' && this.previewState) {

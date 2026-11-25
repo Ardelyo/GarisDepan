@@ -200,19 +200,15 @@ export function newGame(map: GameMap, slots: PlayerSlot[], minors: number, setti
     lastOrders: countries.map(() => []),
     stats: [],
   };
-  // starting garrisons respect province stacking limits: overflow moves to provinces with room
+  // starting garrisons: frontier provinces partly manned, interior thin, capital & cities full.
+  // Leaves room to concentrate — a defended line is possible, a defended everywhere is not.
   for (const c of countries) {
     const mine = P.filter((p) => owner[p.id] === c.id).map((p) => p.id);
-    let overflow = 0;
     for (const i of mine) {
       const cap = stackCap(map, state, i);
-      if (provs[i].troops > cap) { overflow += provs[i].troops - cap; provs[i].troops = cap; }
-    }
-    const room = mine.map((i) => Math.max(0, stackCap(map, state, i) - provs[i].troops));
-    const tot = room.reduce((x, y) => x + y, 0);
-    if (tot > 0 && overflow > 0) {
-      const k = Math.min(1, overflow / tot);
-      mine.forEach((i, j) => (provs[i].troops += Math.floor((room[j] * k) / 100) * 100));
+      const frontier = P[i].neighbors.some((n) => owner[n] !== c.id);
+      const share = i === c.capital || provs[i].urban > 0 ? 1 : frontier ? 0.6 : 0.25;
+      provs[i].troops = Math.min(provs[i].troops, Math.round((cap * share) / 100) * 100);
     }
   }
   return state;

@@ -17,6 +17,10 @@ export interface ColView {
   fighting: boolean;
   kind: 'serang' | 'gerak' | 'mundur';
   alpha: number;
+  /** Route is the player's own drawn stroke (not the province-centre spline). */
+  drawn: boolean;
+  /** Width of the planned arrow in px (from the order's commitment). */
+  width: number;
 }
 export interface AnnexAnim { prov: number; from: number; to: number; ex: number; ey: number; t0: number; dur: number }
 
@@ -58,6 +62,11 @@ export function fmtCompact(n: number): string {
 export function hexA(hex: string, a: number): string {
   const r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
   return `rgba(${r},${g},${b},${a})`;
+}
+
+/** Lightened/darkened colour with alpha. */
+function shadeA(hex: string, k: number, a: number): string {
+  return shade(hex, k).replace('rgb(', 'rgba(').replace(')', `,${a})`);
 }
 
 function shade(hex: string, k: number): string {
@@ -175,6 +184,30 @@ export class Renderer {
       this.routeCache.set(key, r);
     }
     return r;
+  }
+
+  /** The line an arrow order is drawn along: the player's own stroke when there is one. */
+  orderLine(o: Order): Pt[] {
+    if ((o.kind === 'serang' || o.kind === 'gerak') && o.stroke && o.stroke.length >= 2) return o.stroke;
+    return this.route((o as { path: number[] }).path);
+  }
+
+  private provCells: (Int32Array | null)[] = [];
+  /** Grid cells belonging to a province (lazy). */
+  cellsOf(i: number): Int32Array {
+    let c = this.provCells[i];
+    if (c) return c;
+    const m = this.map;
+    const b = m.provinces[i].bbox;
+    const out: number[] = [];
+    for (let gy = Math.floor(b.y0 / m.cell); gy < Math.ceil(b.y1 / m.cell); gy++)
+      for (let gx = Math.floor(b.x0 / m.cell); gx < Math.ceil(b.x1 / m.cell); gx++) {
+        const k = gy * m.gw + gx;
+        if (gx >= 0 && gy >= 0 && gx < m.gw && gy < m.gh && m.cellProv[k] === i) out.push(k);
+      }
+    c = Int32Array.from(out);
+    this.provCells[i] = c;
+    return c;
   }
 
   private dotPattern(color: string, dense = false): CanvasPattern {
@@ -356,7 +389,7 @@ export class Renderer {
           if (!k) continue;
           ctx.save();
           ctx.clip(this.provPath[side]);
-          ctx.strokeStyle = this.dotPattern(hexA(shade(k.color, 0.25), 1), true);
+          ctx.strokeStyle = this.dotPattern(shadeA(k.color, 0.25, 1), true);
           ctx.lineWidth = 16 / z;
           this.strokePts(arc.pts);
           ctx.restore();
@@ -401,7 +434,7 @@ export class Renderer {
     const dpr = this.dpr;
     const sat = this.theme === 'satelit';
     const s = v.state;
-    const shake = this.fx.shake(now);
+    const shake = this.fx.shake();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.fillStyle = sat ? '#060c16' : '#3a98e6';
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
@@ -415,10 +448,10 @@ export class Renderer {
       return;
     }
     this.rebuildBorders(s, v.ctrl);
-    const P = map.provinces;
     const fillA = sat ? 0.4 : 0.3;
     const annexFrom = new Map<number, number>();
-    for (const a of v.annex) if (now < a.t0 + a.dur) annexFrom.set(a.prov, a.from);
+    const vt = this.fx.time;
+    for (const a of v.annex) if (vt < a.t0 + a.dur) annexFrom.set(a.prov, a.from);
     const px = z * dpr;
     if (px <= 1.7) {
       const S = px <= 0.8 ? 0.8 : px <= 1.15 ? 1.15 : 1.7;
@@ -431,31 +464,15 @@ export class Renderer {
       this.drawLayers(v, now, z, annexFrom);
     }
 
-    // ---- annexation wipes (radial flow from the entry point) ----
+    // ---- progressive capture: control spreads cell by cell from the entry point ----
+    for (const an of v.annex) this.drawGrowth(an, v, vt, base.canvas, fillA);
     for (const an of v.annex) {
-      const i = an.prov;
-      const k = s.countries[an.to];
-      if (!k || now < an.t0 || now > an.t0 + an.dur) continue;
-      const t = (now - an.t0) / an.dur;
-      const bb = P[i].bbox;
-      const maxR = Math.hypot(Math.max(an.ex - bb.x0, bb.x1 - an.ex), Math.max(an.ey - bb.y0, bb.y1 - an.ey));
-      const r = maxR * (1 - Math.pow(1 - t, 2.2));
-      ctx.save();
-      ctx.clip(this.provPath[i]);
-      ctx.beginPath();
-      ctx.arc(an.ex, an.ey, r, 0, Math.PI * 2);
-      ctx.fillStyle = hexA(k.color, fillA + 0.15);
-      ctx.fill();
-      ctx.strokeStyle = hexA(sat ? '#ffffff' : k.color, 0.85 * (1 - t));
-      ctx.lineWidth = 6 / z;
-      ctx.stroke();
-      ctx.restore();
-    }
-    for (const an of v.annex) {
-      const t = (now - an.t0 - an.dur) / 500;
+      const t = (vt - an.t0 - an.dur) / 700;
       if (t < 0 || t > 1) continue;
-      ctx.strokeStyle = sat ? `rgba(255,255,255,${1 - t})` : `rgba(0,0,0,${0.8 * (1 - t)})`;
-      ctx.lineWidth = (3 + 4 * t) / z;
+      const k = s.countries[an.to];
+      if (!k) continue;
+      ctx.strokeStyle = sat ? `rgba(255,255,255,${0.7 * (1 - t)})` : hexA(k.color, 0.8 * (1 - t));
+      ctx.lineWidth = (2 + 3 * t) / z;
       ctx.stroke(this.provPath[an.prov]);
     }
 
@@ -494,14 +511,12 @@ export class Renderer {
     for (const d of v.orders) this.drawOrder(d, s.countries[v.orderOwner]?.color ?? '#fff', now, 1);
 
     // ---- effects (world) ----
-    this.fx.draw(ctx, now, z, this.theme);
+    this.fx.draw(ctx, z, this.theme);
 
     // ---- units (screen space) ----
     ctx.setTransform(dpr, 0, 0, dpr, shake.x * dpr, shake.y * dpr);
-    if (v.mode !== 'idle') {
-      this.drawFrontFlags(v);
-      this.drawCounters(v, now);
-    }
+    if (v.mode !== 'idle') this.drawFrontFlags(v);
+    if (v.mode === 'plan') this.drawCounters(v, now);
     this.drawColumns(v, now);
     this.drawCapitals(v);
 
@@ -622,8 +637,8 @@ export class Renderer {
       case 'serang':
       case 'gerak': {
         const w = (o.frac === 1 ? 12 : o.frac === 0.5 ? 8 : 5) * pop;
-        this.drawArrow(this.route(o.path), color, w, { dashed: o.kind === 'gerak', invalid, alpha });
-        const tip = pointAlong(this.route(o.path), 1);
+        this.drawArrow(this.orderLine(o), color, w, { dashed: o.kind === 'gerak', invalid, alpha });
+        const tip = pointAlong(this.orderLine(o), 1);
         if (d.selected) this.label(`${Math.round(o.frac * 100)}%`, tip.x, tip.y - 22 / z, '#fff');
         if (o.kind === 'serang' && d.odds !== undefined && d.valid) this.oddsBadge(d.odds, tip.x, tip.y + 20 / z, !!d.selected);
         break;
@@ -707,7 +722,7 @@ export class Renderer {
       }
     }
     if (invalid && d.reason && (o.kind === 'serang' || o.kind === 'gerak')) {
-      const t = pointAlong(this.route(o.path), 0.5);
+      const t = pointAlong(this.orderLine(o), 0.5);
       this.label('⚠ ' + d.reason, t.x, t.y - 14 / z, '#ff6b5e', 12);
     }
   }
@@ -883,46 +898,143 @@ export class Renderer {
     }
   }
 
+  /**
+   * Cell-level growth of a captured province. Cells reveal by distance from the entry point
+   * (+ noise), so ground is painted in: faint stipple leads, a bright rim follows, the
+   * interior fills behind it. Old colour is wiped by redrawing terrain under revealed cells.
+   */
+  private drawGrowth(an: AnnexAnim, v: View, now: number, base: HTMLCanvasElement, fillA: number) {
+    if (now < an.t0 || now > an.t0 + an.dur) return;
+    const k = v.state.countries[an.to];
+    if (!k) return;
+    const ctx = this.ctx;
+    const m = this.map;
+    const P = m.provinces;
+    const bb = P[an.prov].bbox;
+    const maxR = Math.hypot(Math.max(an.ex - bb.x0, bb.x1 - an.ex), Math.max(an.ey - bb.y0, bb.y1 - an.ey)) + 1;
+    const jitter = maxR * 0.28;
+    const T = (now - an.t0) / an.dur;
+    const R = T * (maxR + jitter + 12);
+    const rim = 9, lead = 14;
+    const cs = m.cell;
+    const cells = this.cellsOf(an.prov);
+    const solid = new Path2D(), rimP = new Path2D(), leadP = new Path2D();
+    for (let n = 0; n < cells.length; n++) {
+      const ci = cells[n];
+      const gx = ci % m.gw, gy = (ci / m.gw) | 0;
+      const x = gx * cs, y = gy * cs;
+      const hsh = Math.sin(ci * 12.9898) * 43758.5453;
+      const r01 = hsh - Math.floor(hsh);
+      const d = Math.hypot(x + cs / 2 - an.ex, y + cs / 2 - an.ey) + r01 * jitter;
+      if (d < R - rim) solid.rect(x - 0.3, y - 0.3, cs + 0.6, cs + 0.6);
+      else if (d < R) { solid.rect(x - 0.3, y - 0.3, cs + 0.6, cs + 0.6); rimP.rect(x + 0.6, y + 0.6, cs - 1.2, cs - 1.2); }
+      else if (d < R + lead && r01 > 0.55) leadP.rect(x + cs * 0.3, y + cs * 0.3, cs * 0.45, cs * 0.45);
+    }
+    ctx.save();
+    ctx.clip(this.provPath[an.prov]);
+    ctx.save();
+    ctx.clip(solid);
+    ctx.drawImage(base, 0, 0, m.w, m.h);
+    ctx.fillStyle = hexA(k.color, fillA);
+    ctx.fill(this.provPath[an.prov]);
+    ctx.restore();
+    ctx.fillStyle = shadeA(k.color, 0.2, 0.95);
+    ctx.fill(rimP);
+    ctx.fillStyle = hexA(k.color, 0.75);
+    ctx.fill(leadP);
+    ctx.restore();
+  }
+
+  /** Columns: the remaining arrow (used up as the army advances), a formation block and one unit card. */
   private drawColumns(v: View, now: number) {
     const c = this.ctx;
     const z = this.cam.zoom;
     const s = v.state;
     const sat = this.theme === 'satelit';
+    // 1. remaining arrows (world space)
+    c.save();
+    c.setTransform(this.dpr * z, 0, 0, this.dpr * z, this.dpr * (this.W / 2 - this.cam.x * z), this.dpr * (this.H / 2 - this.cam.y * z));
+    for (const col of v.cols) {
+      const k = s.countries[col.owner];
+      if (!k || col.kind === 'mundur' || col.alpha <= 0.01 || col.u >= 0.97) continue;
+      const L = polyLength(col.route);
+      const ahead = subPath(col.route, col.u, 1, Math.max(6, Math.round(L / 8)));
+      this.drawArrow(ahead, k.color, col.width, { dashed: col.kind === 'gerak', alpha: 0.6 * col.alpha });
+      // the ground already covered stays as a faint trail
+      if (col.u > 0.02) {
+        c.globalAlpha = 0.28 * col.alpha;
+        c.strokeStyle = k.color;
+        c.lineCap = 'round';
+        c.lineWidth = Math.max(2, col.width * 0.45) / z;
+        this.strokePts(subPath(col.route, 0, col.u, 24));
+        c.globalAlpha = 1;
+      }
+    }
+    c.restore();
+
+    // 2. formations + cards (screen space)
     for (const col of v.cols) {
       const k = s.countries[col.owner];
       if (!k || col.alpha <= 0.01) continue;
-      const L = polyLength(col.route);
-      const n = clamp(Math.round(2 + Math.log2(Math.max(1, col.troops / 2500))), 3, 8);
-      const spacing = 13 / z / Math.max(1, L);
-      c.globalAlpha = col.alpha;
-      for (let i = n - 1; i >= 0; i--) {
-        const u = col.u - i * spacing;
-        if (u < 0) continue;
-        const p = pointAlong(col.route, u);
-        let sp = this.worldToScreen(p.x, p.y);
-        if (col.fighting) sp = { x: sp.x + Math.sin(now / 40 + i * 2) * 2, y: sp.y + Math.cos(now / 33 + i) * 1.5 };
-        if (sat || col.kind === 'gerak') {
-          const fb = flagBitmap(k.flag, 14, 9);
-          c.drawImage(fb, sp.x - 8, sp.y - 6, 16, 11);
-        } else {
-          c.beginPath();
-          c.arc(sp.x, sp.y, 5.5, 0, Math.PI * 2);
-          c.fillStyle = k.color;
-          c.fill();
-          c.strokeStyle = '#111';
-          c.lineWidth = 1.4;
-          c.stroke();
-        }
-      }
-      const head = pointAlong(col.route, col.u);
+      const head = pointAlong(col.route, Math.min(1, Math.max(0, col.u)));
+      const back = pointAlong(col.route, Math.max(0, col.u - 0.04));
+      let ang = Math.atan2(head.y - back.y, head.x - back.x);
+      if (col.kind === 'mundur' || !Number.isFinite(ang)) ang = head.a;
       const hs = this.worldToScreen(head.x, head.y);
-      c.font = `800 13px ${COUNTER_FONT}`;
-      c.textAlign = 'center';
-      c.lineWidth = 3;
-      c.strokeStyle = 'rgba(0,0,0,0.9)';
-      c.strokeText(fmtCompact(col.troops), hs.x, hs.y - 14);
-      c.fillStyle = col.kind === 'mundur' ? '#ffb3ad' : '#fff';
-      c.fillText(fmtCompact(col.troops), hs.x, hs.y - 14);
+      const rows = clamp(Math.ceil(col.troops / 7000), 1, 5);
+      const per = clamp(Math.ceil(col.troops / 2500 / rows), 2, 4);
+      const gap = 7, sz = sat ? 5 : 5.5;
+      c.globalAlpha = col.alpha;
+      c.save();
+      c.translate(hs.x, hs.y);
+      c.rotate(ang);
+      for (let r = 0; r < rows; r++)
+        for (let q = 0; q < per; q++) {
+          let x = -r * gap, y = (q - (per - 1) / 2) * gap;
+          if (col.fighting) { x += Math.sin(now / 45 + r * 3 + q) * 1.6; y += Math.cos(now / 38 + q * 2) * 1.2; }
+          if (sat) {
+            c.fillStyle = col.kind === 'mundur' ? hexA(k.color, 0.6) : k.color;
+            c.fillRect(x - sz / 2, y - sz / 2, sz, sz);
+            c.strokeStyle = 'rgba(0,0,0,0.7)';
+            c.lineWidth = 0.8;
+            c.strokeRect(x - sz / 2, y - sz / 2, sz, sz);
+          } else {
+            c.beginPath();
+            c.arc(x, y, sz / 2 + 0.5, 0, Math.PI * 2);
+            c.fillStyle = k.color;
+            c.fill();
+            c.strokeStyle = '#111';
+            c.lineWidth = 1.1;
+            c.stroke();
+          }
+        }
+      c.restore();
+      // unit card: white box, flag, bold caps, one strength figure (as in the reference)
+      if (col.troops >= 1500 && col.kind !== 'mundur') {
+        const name = (k.name.length <= 12 ? k.name : k.name.split(' ').pop() ?? k.name).toUpperCase();
+        const txt = fmtCompact(col.troops);
+        c.font = `800 10px ${COUNTER_FONT}`;
+        const w = Math.max(c.measureText(name).width, c.measureText(txt).width) + 26;
+        const bx = hs.x + 10, by = hs.y - 34;
+        c.fillStyle = 'rgba(0,0,0,0.35)';
+        c.fillRect(bx + 1.5, by + 1.5, w, 24);
+        c.fillStyle = '#f4f4f0';
+        c.fillRect(bx, by, w, 24);
+        c.drawImage(flagBitmap(k.flag, 12, 8), bx + 3, by + 3, 14, 10);
+        c.fillStyle = '#111';
+        c.textAlign = 'left';
+        c.textBaseline = 'alphabetic';
+        c.fillText(name, bx + 20, by + 11);
+        c.font = `800 11px ${COUNTER_FONT}`;
+        c.fillStyle = col.fighting ? '#c41e2a' : '#111';
+        c.fillText(txt, bx + 20, by + 21);
+        c.strokeStyle = 'rgba(0,0,0,0.5)';
+        c.lineWidth = 0.8;
+        c.beginPath();
+        c.moveTo(hs.x + 3, hs.y - 3);
+        c.lineTo(bx, by + 24);
+        c.stroke();
+      }
       c.globalAlpha = 1;
     }
   }

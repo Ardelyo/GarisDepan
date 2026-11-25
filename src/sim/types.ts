@@ -164,11 +164,14 @@ export interface ColSnap {
   fighting: boolean;
   kind: 'serang' | 'gerak' | 'mundur';
   gone?: boolean;
+  /** The player's drawn arrow (world coords), shared by reference across frames. */
+  stroke?: Pt[];
 }
 
 export type SimEvent =
-  | { t: 'battle'; prov: number; x: number; y: number; atk: number[]; def: number; size: number; lossA: number; lossD: number }
-  | { t: 'capture'; prov: number; from: number; to: number; ex: number; ey: number }
+  | { t: 'battle'; prov: number; x: number; y: number; atk: number[]; def: number; size: number; lossA: number; lossD: number; at: number }
+  /** at = moment inside the day (0..1) — events are staggered, never all at once. how = why it fell. */
+  | { t: 'capture'; prov: number; from: number; to: number; ex: number; ey: number; at: number; how: 'serbu' | 'lindas' | 'serap' }
   | { t: 'moment'; text: string; country: number; x: number; y: number; kind: 'dikepung' | 'ibukota' | 'gagal' | 'terobosan' | 'perang' | 'damai' }
   | { t: 'air'; owner: number; x: number; y: number; r: number }
   | { t: 'amphib'; owner: number; from: number; to: number };
