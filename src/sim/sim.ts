@@ -3,7 +3,8 @@ import type { GameMap } from '../map/types';
 import { TERRAIN_INFO } from '../map/types';
 import {
   BUILD_INFO, PROPOSAL_NAME, RULES, allied, atWar, countryGdp, defenseMultiplier, findPath, friendlyTo,
-  isSeaStep, manpowerCap, orderCost, suppliedSet, totalPop, totalTroops,
+  isSeaStep, manpowerCap, orderCost, SUPPLY_CUT, SUPPLY_STRETCHED, stackCap, supplyCombat, supplyLevels,
+  totalPop, totalTroops,
 } from './rules';
 import { applyEventChoice, rollEvent } from './events';
 import { aiAcceptsProposal } from './ai';
@@ -152,7 +153,7 @@ export function resolveTurn(map: GameMap, input: GameState, orders: Order[][]): 
   }
 
   // ---------------- 2. economy orders ----------------
-  const recruits = new Map<number, number>();
+  const recruits = new Map<number, { amount: number; owner: number; cost: number }>();
   const airZones: { owner: number; x: number; y: number; r: number }[] = [];
   for (let c = 0; c < nC; c++) {
     const me = s.countries[c];
@@ -177,7 +178,10 @@ export function resolveTurn(map: GameMap, input: GameState, orders: Order[][]): 
         case 'rekrut':
           if (s.provs[o.prov].ctrl !== c) break;
           if (totalTroops(s, c) + o.amount > manpowerCap(s, c)) break;
-          recruits.set(o.prov, (recruits.get(o.prov) ?? 0) + o.amount);
+          {
+            const prev = recruits.get(o.prov);
+            recruits.set(o.prov, { amount: (prev?.amount ?? 0) + o.amount, owner: c, cost: (prev?.cost ?? 0) + cost });
+          }
           me.treasury -= cost;
           break;
         case 'hangus': {
@@ -270,7 +274,7 @@ export function resolveTurn(map: GameMap, input: GameState, orders: Order[][]): 
   });
   frames.push(snap(0, day0Events));
 
-  const supplied = s.countries.map((_, c) => suppliedSet(map, s, c));
+  const supplied = s.countries.map((_, c) => supplyLevels(map, s, c));
   const airCovers = (owner: number, prov: number) =>
     airZones.some((z) => z.owner === owner && Math.hypot(P[prov].x - z.x, P[prov].y - z.y) < z.r + 20);
   const morale = (c: number) => 0.85 + 0.3 * (s.countries[c].stability / 100) - 0.15 * (s.countries[c].weariness / 100);
@@ -398,14 +402,14 @@ export function resolveTurn(map: GameMap, input: GameState, orders: Order[][]): 
       const pincer = sources.size >= 2 ? RULES.pincerBonus : 1;
       const effOf = (c: Col) =>
         c.troops * s.countries[c.owner].quality * morale(c.owner) *
-        (supplied[c.owner][c.path[c.idx]] ? 1 : RULES.unsuppliedCombat) *
+        supplyCombat(supplied[c.owner][c.path[c.idx]]) *
         (c.amphib[c.idx] ? RULES.amphibPenalty : 1) *
         (airCovers(c.owner, q) ? RULES.airBonus : 1) * pincer;
       const A = atk.reduce((a, c) => a + c.troops, 0);
       let Aeff = atk.reduce((a, c) => a + effOf(c), 0);
       const D = pq.troops;
       const Deff = Math.max(1, D) * (s.countries[def]?.quality ?? 1) * (s.countries[def] ? morale(def) : 1) *
-        defenseMultiplier(map, s, q) * (supplied[def]?.[q] ? 1 : RULES.unsuppliedCombat) *
+        defenseMultiplier(map, s, q) * (supplied[def] ? supplyCombat(supplied[def][q]) : 1) *
         (airCovers(def, q) ? RULES.airBonus : 1);
       let lossA = Math.min(A * 0.5, (RULES.lanchesterK * Deff * A) / Math.max(1, Aeff));
       let lossD = Math.min(D, (RULES.lanchesterK * Aeff * Math.max(1, D)) / Deff);
@@ -495,24 +499,40 @@ export function resolveTurn(map: GameMap, input: GameState, orders: Order[][]): 
   last.cols = last.cols.map((c) => ({ ...c, gone: true }));
 
   // ---------------- 5. end of turn ----------------
-  recruits.forEach((amt, p) => { if (s.provs[p].ctrl === s.provs[p].owner) s.provs[p].troops += amt; });
-
+  // supply attrition + overcrowding (troops above what a province can feed)
+  const endSupply: Uint8Array[] = s.countries.map((_, c) => supplyLevels(map, s, c));
   for (let c = 0; c < nC; c++) {
     const me = s.countries[c];
     if (!me.alive) continue;
-    const sup = suppliedSet(map, s, c);
-    let cut = 0;
+    const sup = endSupply[c];
+    let cut = 0, stretched = 0, crowded = 0, crowdLoss = 0;
     s.provs.forEach((p, i) => {
       if (p.ctrl !== c || p.troops <= 0) return;
-      if (!sup[i]) {
-        const l = p.troops * RULES.unsuppliedAttrition;
-        p.troops -= l;
-        casualties[c] += l;
-        cut++;
+      let l = 0;
+      if (sup[i] === SUPPLY_CUT) { l = p.troops * RULES.unsuppliedAttrition; cut++; }
+      else if (sup[i] === SUPPLY_STRETCHED) { l = p.troops * RULES.stretchedAttrition; stretched++; }
+      const cap = stackCap(map, s, i);
+      if (p.troops - l > cap) {
+        const over = (p.troops - l - cap) * RULES.overStackLoss;
+        l += over;
+        crowdLoss += over;
+        crowded++;
       }
+      p.troops -= l;
+      casualties[c] += l;
     });
     if (cut) priv[c].push(`${cut} provinsi terputus dari suplai — pasukan di sana melemah 10%/minggu.`);
+    if (stretched) priv[c].push(`${stretched} provinsi di ujung jalur suplai — pasukan melemah 4%/minggu dan tempur −18%. Bangun jalan/rel atau rebut kota.`);
+    if (crowded) priv[c].push(`${crowded} provinsi kelebihan pasukan — ${fmtInt(crowdLoss)} tentara hilang karena logistik tak sanggup. Sebarkan pasukan.`);
   }
+  // fresh recruits arrive after attrition; refund if the province fell
+  recruits.forEach((r, p) => {
+    if (s.provs[p].ctrl === r.owner && s.provs[p].owner === r.owner) s.provs[p].troops += r.amount;
+    else {
+      s.countries[r.owner].treasury += r.cost;
+      priv[r.owner].push(`Rekrutmen di provinsi ${p + 1} batal karena wilayahnya jatuh — kas dikembalikan.`);
+    }
+  });
 
   s.provs.forEach((p) => {
     if (p.ctrl !== p.owner) {
@@ -557,22 +577,26 @@ export function resolveTurn(map: GameMap, input: GameState, orders: Order[][]): 
     let reinforce = ((auto * b.mil) / 100 / RULES.recruitCostPer1000) * 1000 + milFactories * 600;
     reinforce = Math.max(0, Math.min(reinforce, cap - troops));
     if (reinforce > 0) {
-      const sup = suppliedSet(map, s, c);
-      const holders = s.provs.map((p, i) => (p.ctrl === c && sup[i] ? Math.max(p.troops, 300) : 0));
-      const tot = holders.reduce((x, y) => x + y, 0);
-      if (tot > 0) holders.forEach((h, i) => { if (h) s.provs[i].troops += (reinforce * h) / tot; });
+      // reinforcements only go where there is supply and room to feed them
+      const sup = endSupply[c];
+      const room = s.provs.map((p, i) => (p.ctrl === c && sup[i] > SUPPLY_CUT ? Math.max(0, stackCap(map, s, i) - p.troops) : 0));
+      const tot = room.reduce((x, y) => x + y, 0);
+      reinforce = Math.min(reinforce, tot);
+      if (tot > 0) room.forEach((h, i) => { if (h) s.provs[i].troops += (reinforce * h) / tot; });
     }
     // civil budget → stability & growth
     me.stability += (b.civ - 30) / 25;
     s.provs.forEach((p) => { if (p.owner === c && p.ctrl === c) p.pop *= 1 + 0.0006 * (b.civ / 40); });
     // research
-    me.researchPts += (auto * b.res) / 100;
-    const need = 120 * me.quality * me.quality;
-    if (me.researchPts >= need) {
-      me.researchPts -= need;
-      me.quality = Math.round((me.quality + 0.05) * 100) / 100;
-      priv[c].push(`Riset selesai: kualitas peralatan naik menjadi ${Math.round(me.quality * 100)}%.`);
-    }
+    if (me.quality < RULES.qualityCap) {
+      me.researchPts += (auto * b.res) / 100;
+      const need = 120 * me.quality * me.quality;
+      if (me.researchPts >= need) {
+        me.researchPts -= need;
+        me.quality = Math.min(RULES.qualityCap, Math.round((me.quality + 0.05) * 100) / 100);
+        priv[c].push(`Riset selesai: kualitas peralatan naik menjadi ${Math.round(me.quality * 100)}%.`);
+      }
+    } else me.researchPts = 0;
     if (me.treasury < 0) me.stability -= 4;
     // weariness & stability
     const pop = Math.max(1, totalPop(s, c) * 1000);
@@ -680,6 +704,11 @@ export function scoreOf(s: GameState, c: number, gdp: number): number {
   return Math.round(provs * 10 + gdp * 4 + k.stability + totalTroops(s, c) / 20000 + k.reputation / 5);
 }
 
+/** Population share needed for a domination win: 60% with 2 great powers, less with more rivals. */
+export function dominationShare(majors: number): number {
+  return Math.min(0.6, 0.25 + 0.7 / Math.max(2, majors));
+}
+
 function checkVictory(s: GameState, gdps: number[], news: string[]) {
   if (s.winner) return;
   const majors = s.countries.filter((k) => k.kind !== 'minor');
@@ -695,7 +724,8 @@ function checkVictory(s: GameState, gdps: number[], news: string[]) {
     if (v.dominasi) {
       const pop = s.provs.reduce((a, p) => a + (p.ctrl === k.id ? p.pop : 0), 0);
       const allCaps = majors.filter((o) => o.id !== k.id).every((o) => s.provs[o.homeCapital].ctrl === k.id);
-      if (pop / worldPop >= 0.6) s.winner = { country: k.id, cond: 'Dominasi: menguasai 60% populasi dunia' };
+      const need = dominationShare(majors.length);
+      if (pop / worldPop >= need) s.winner = { country: k.id, cond: `Dominasi: menguasai ${Math.round(need * 100)}% populasi dunia` };
       else if (allCaps && majors.length > 1) s.winner = { country: k.id, cond: 'Dominasi: menguasai semua ibu kota lawan' };
     }
     if (!s.winner && v.ekonomi) {

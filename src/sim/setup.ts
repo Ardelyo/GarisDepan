@@ -1,5 +1,6 @@
 import { Rng } from '../core/rng';
 import type { GameMap } from '../map/types';
+import { stackCap } from './rules';
 import type {
   Country, CountryKind, FlagSpec, GameState, Personality, ProvState, Relation, Settings,
 } from './types';
@@ -180,7 +181,7 @@ export function newGame(map: GameMap, slots: PlayerSlot[], minors: number, setti
     }),
   );
 
-  return {
+  const state: GameState = {
     version: 1,
     map: map.params,
     turn: 1,
@@ -199,6 +200,22 @@ export function newGame(map: GameMap, slots: PlayerSlot[], minors: number, setti
     lastOrders: countries.map(() => []),
     stats: [],
   };
+  // starting garrisons respect province stacking limits: overflow moves to provinces with room
+  for (const c of countries) {
+    const mine = P.filter((p) => owner[p.id] === c.id).map((p) => p.id);
+    let overflow = 0;
+    for (const i of mine) {
+      const cap = stackCap(map, state, i);
+      if (provs[i].troops > cap) { overflow += provs[i].troops - cap; provs[i].troops = cap; }
+    }
+    const room = mine.map((i) => Math.max(0, stackCap(map, state, i) - provs[i].troops));
+    const tot = room.reduce((x, y) => x + y, 0);
+    if (tot > 0 && overflow > 0) {
+      const k = Math.min(1, overflow / tot);
+      mine.forEach((i, j) => (provs[i].troops += Math.floor((room[j] * k) / 100) * 100));
+    }
+  }
+  return state;
 }
 
 export function dateOf(state: GameState, turn = state.turn): Date {

@@ -7,7 +7,8 @@ import { Effects } from './effects';
 import { flagBitmap } from './flags';
 import { buildBase, type BaseLayers } from './terrain';
 
-export interface DrawnOrder { order: Order; valid: boolean; reason?: string; selected?: boolean }
+/** odds: undefined = not an attack, null = target hidden by fog, number = attacker:defender estimate. */
+export interface DrawnOrder { order: Order; valid: boolean; reason?: string; selected?: boolean; odds?: number | null }
 export interface ColView {
   owner: number;
   route: Pt[];
@@ -28,7 +29,7 @@ export interface View {
   orders: DrawnOrder[];
   orderOwner: number;
   intel: { orders: Order[]; owner: number } | null;
-  draft: { pts: Pt[]; color: string; dashed: boolean; width: number } | null;
+  draft: { pts: Pt[]; color: string; dashed: boolean; width: number; odds?: number | null } | null;
   cols: ColView[];
   annex: AnnexAnim[];
   flash: Map<number, number>;
@@ -39,6 +40,10 @@ export interface View {
 }
 
 export interface Camera { x: number; y: number; zoom: number }
+
+/** Odds thresholds for the planning badge (attacker:defender, before losses). */
+export const ODDS_GOOD = 2.0;
+export const ODDS_EVEN = 1.3;
 
 const COUNTER_FONT = "'Barlow Condensed', 'Oswald', 'Arial Narrow', 'Roboto Condensed', sans-serif";
 
@@ -513,6 +518,10 @@ export class Renderer {
       ctx.lineWidth = v.draft.width;
       this.strokeScreen(v.draft.pts);
       ctx.restore();
+      if (v.draft.odds !== undefined) {
+        const end = v.draft.pts[v.draft.pts.length - 1];
+        this.oddsBadge(v.draft.odds, end.x, end.y - 34 / z, true);
+      }
     }
 
     // ---- screen-space vignette / spotlight ----
@@ -614,10 +623,9 @@ export class Renderer {
       case 'gerak': {
         const w = (o.frac === 1 ? 12 : o.frac === 0.5 ? 8 : 5) * pop;
         this.drawArrow(this.route(o.path), color, w, { dashed: o.kind === 'gerak', invalid, alpha });
-        if (d.selected) {
-          const t = pointAlong(this.route(o.path), 1);
-          this.label(`${Math.round(o.frac * 100)}%`, t.x, t.y - 22 / z, '#fff');
-        }
+        const tip = pointAlong(this.route(o.path), 1);
+        if (d.selected) this.label(`${Math.round(o.frac * 100)}%`, tip.x, tip.y - 22 / z, '#fff');
+        if (o.kind === 'serang' && d.odds !== undefined && d.valid) this.oddsBadge(d.odds, tip.x, tip.y + 20 / z, !!d.selected);
         break;
       }
       case 'bertahan': {
@@ -702,6 +710,37 @@ export class Renderer {
       const t = pointAlong(this.route(o.path), 0.5);
       this.label('⚠ ' + d.reason, t.x, t.y - 14 / z, '#ff6b5e', 12);
     }
+  }
+
+  /**
+   * Strength estimate pill at an arrow tip: green = likely breakthrough,
+   * amber = costly/uncertain, red = likely to fail, grey = target hidden by fog.
+   */
+  private oddsBadge(odds: number | null, wx: number, wy: number, big: boolean) {
+    const c = this.ctx;
+    const sp = this.worldToScreen(wx, wy);
+    const ratio = odds === null ? '?' : odds >= 10 ? '10+ : 1' : `${odds.toFixed(1).replace('.', ',')} : 1`;
+    const word = odds === null ? 'tak terlihat' : odds >= ODDS_GOOD ? 'unggul' : odds >= ODDS_EVEN ? 'alot' : 'berat';
+    const bg = odds === null ? '#5b6472' : odds >= ODDS_GOOD ? '#1f9d55' : odds >= ODDS_EVEN ? '#d99a00' : '#d64236';
+    const text = big ? `${ratio} · ${word}` : ratio;
+    c.save();
+    c.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    const size = big ? 14 : 12;
+    c.font = `800 ${size}px ${COUNTER_FONT}`;
+    const w = c.measureText(text).width + 14, hgt = size + 8;
+    c.fillStyle = 'rgba(0,0,0,0.55)';
+    c.beginPath();
+    c.roundRect(sp.x - w / 2, sp.y - hgt / 2 + 1.5, w, hgt, hgt / 2);
+    c.fill();
+    c.fillStyle = bg;
+    c.beginPath();
+    c.roundRect(sp.x - w / 2, sp.y - hgt / 2, w, hgt, hgt / 2);
+    c.fill();
+    c.fillStyle = '#fff';
+    c.textAlign = 'center';
+    c.textBaseline = 'middle';
+    c.fillText(text, sp.x, sp.y + 0.5);
+    c.restore();
   }
 
   /** Text label at world position, constant screen size. */

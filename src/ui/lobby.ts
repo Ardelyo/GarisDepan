@@ -144,7 +144,7 @@ export function buildLobby(root: HTMLElement, cb: LobbyCallbacks): HTMLElement {
       field('Mode kidal', toggle(() => cfg.lefty, (v) => (cfg.lefty = v)))),
     h('div', { class: 'panel lob' },
       h('h3', null, 'Kondisi menang'),
-      field('Dominasi', toggle(() => cfg.settings.victory.dominasi, (v) => (cfg.settings.victory.dominasi = v)), '60% populasi dunia atau semua ibu kota lawan'),
+      field('Dominasi', toggle(() => cfg.settings.victory.dominasi, (v) => (cfg.settings.victory.dominasi = v)), 'Porsi populasi dunia (60% untuk 2 negara, makin kecil bila makin banyak lawan) atau semua ibu kota lawan'),
       field('Ekonomi', toggle(() => cfg.settings.victory.ekonomi, (v) => (cfg.settings.victory.ekonomi = v)), '40% PDB dunia selama 12 giliran'),
       field('Skor', toggle(() => cfg.settings.victory.skor, (v) => (cfg.settings.victory.skor = v)), 'Skor tertinggi saat batas giliran'),
       field('Batas giliran', turnIn)),
